@@ -1,0 +1,297 @@
+"""SdrDocument persistence (asyncpg) + retention policy helpers."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
+
+import asyncpg
+
+from sdr.domain.document_storage import SCHEMA_STATUS
+
+SCHEMA = "facilcar"
+
+DOCUMENT_TYPES = frozenset({"CNH", "CRLV", "INCOME_PROOF", "RESIDENCE_PROOF", "OTHER"})
+
+RETENTION_DAYS_180 = "DAYS_180"
+RETENTION_PERMANENT = "PERMANENT"
+DEFAULT_RETENTION_DAYS = 180
+
+
+def _new_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def retention_policy_for_lead_status(lead_status: str | None) -> str:
+    """DAYS_180 by default; PERMANENT when lead is WON."""
+    if lead_status and str(lead_status).strip().upper() == "WON":
+        return RETENTION_PERMANENT
+    return RETENTION_DAYS_180
+
+
+def expires_at_for_policy(
+    policy: str,
+    *,
+    created_at: datetime | None = None,
+) -> datetime | None:
+    """PERMANENT → no expiry; DAYS_180 → created_at + 180 days."""
+    if policy == RETENTION_PERMANENT:
+        return None
+    base = created_at or _now()
+    return base + timedelta(days=DEFAULT_RETENTION_DAYS)
+
+
+class DocumentRepository:
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def insert(
+        self,
+        *,
+        storage_key: str,
+        document_type: str = "OTHER",
+        lead_id: str | None = None,
+        conversation_id: str | None = None,
+        mime_type: str | None = None,
+        byte_size: int | None = None,
+        extracted_json: Mapping[str, Any] | None = None,
+        extraction_status: str = "PENDING",
+        retention_policy: str | None = None,
+        lead_status: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> asyncpg.Record:
+        """Insert into facilcar.\"SdrDocument\" (default retention DAYS_180)."""
+        policy = retention_policy or retention_policy_for_lead_status(lead_status)
+        created = _now()
+        exp = expires_at
+        if exp is None and policy != RETENTION_PERMANENT:
+            exp = expires_at_for_policy(policy, created_at=created)
+
+        doc_type = (document_type or "OTHER").upper()
+        status = (extraction_status or "PENDING").upper()
+        payload = json.dumps(dict(extracted_json), ensure_ascii=False) if extracted_json else None
+        doc_id = _new_id()
+
+        sql = f'''
+            INSERT INTO "{SCHEMA}"."SdrDocument"
+              ("id", "leadId", "conversationId", "documentType", "storageKey",
+               "mimeType", "byteSize", "extractedJson", "extractionStatus",
+               "retentionPolicy", "expiresAt", "createdAt")
+            VALUES (
+              $1, $2, $3,
+              $4::"{SCHEMA}"."SdrDocumentType",
+              $5, $6, $7,
+              $8::jsonb,
+              $9::"{SCHEMA}"."SdrDocumentExtractionStatus",
+              $10::"{SCHEMA}"."SdrRetentionPolicy",
+              $11, $12
+            )
+            RETURNING *
+        '''
+        async with self._pool.acquire() as conn:
+            return await conn.fetchrow(
+                sql,
+                doc_id,
+                lead_id,
+                conversation_id,
+                doc_type,
+                storage_key,
+                mime_type,
+                byte_size,
+                payload,
+                status,
+                policy,
+                exp,
+                created,
+            )
+
+    async def get_by_provider(
+        self, conversation_id: str, provider_message_id: str
+    ) -> dict | None:
+        sql = f'''
+            SELECT *
+            FROM "{SCHEMA}"."SdrDocument"
+            WHERE "conversationId" = $1
+              AND "providerMessageId" = $2
+            LIMIT 1
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(sql, conversation_id, provider_message_id)
+        return dict(row) if row else None
+
+    async def upsert_inbound(
+        self,
+        *,
+        conversation_id: str,
+        message_id: str | None = None,
+        provider_message_id: str | None = None,
+        lead_id: str | None = None,
+        document_type: str = "OTHER",
+        storage_key: str | None = None,
+        storage_bucket: str | None = None,
+        storage_status: str = "pending",
+        storage_attempts: int = 0,
+        storage_error: str | None = None,
+        mime_type: str | None = None,
+        byte_size: int | None = None,
+        extracted_json: Mapping[str, Any] | None = None,
+        extraction_status: str = "PENDING",
+        content_hash: str | None = None,
+        retention_policy: str | None = None,
+        lead_status: str | None = None,
+    ) -> dict:
+        """Idempotent persist keyed by conversation + provider message id."""
+        policy = retention_policy or retention_policy_for_lead_status(lead_status)
+        created = _now()
+        exp = expires_at_for_policy(policy, created_at=created)
+        doc_type = (document_type or "OTHER").upper()
+        if doc_type not in DOCUMENT_TYPES:
+            doc_type = "OTHER"
+        extract_status = (extraction_status or "PENDING").upper()
+        schema_status = SCHEMA_STATUS.get(storage_status, storage_status.upper())
+        if schema_status not in SCHEMA_STATUS.values():
+            schema_status = "PENDING"
+        payload = json.dumps(dict(extracted_json), ensure_ascii=False) if extracted_json else None
+        doc_id = _new_id()
+        sql = f'''
+            INSERT INTO "{SCHEMA}"."SdrDocument"
+              ("id", "leadId", "conversationId", "messageId", "providerMessageId",
+               "documentType", "storageKey", "storageBucket", "storageStatus",
+               "storageAttempts", "storageError", "storageUpdatedAt", "contentHash",
+               "mimeType", "byteSize", "extractedJson", "extractionStatus",
+               "retentionPolicy", "expiresAt", "createdAt")
+            VALUES (
+              $1, $2, $3, $4, $5,
+              $6::"{SCHEMA}"."SdrDocumentType",
+              $7, $8,
+              $9::"{SCHEMA}"."SdrDocumentStorageStatus",
+              $10, $11, $12, $13, $14, $15,
+              $16::jsonb,
+              $17::"{SCHEMA}"."SdrDocumentExtractionStatus",
+              $18::"{SCHEMA}"."SdrRetentionPolicy",
+              $19, $20
+            )
+            ON CONFLICT ("conversationId", "providerMessageId")
+            DO UPDATE SET
+              "leadId" = COALESCE(EXCLUDED."leadId", "{SCHEMA}"."SdrDocument"."leadId"),
+              "messageId" = COALESCE(EXCLUDED."messageId", "{SCHEMA}"."SdrDocument"."messageId"),
+              "documentType" = EXCLUDED."documentType",
+              "storageKey" = COALESCE(EXCLUDED."storageKey", "{SCHEMA}"."SdrDocument"."storageKey"),
+              "storageBucket" = COALESCE(EXCLUDED."storageBucket", "{SCHEMA}"."SdrDocument"."storageBucket"),
+              "storageStatus" = EXCLUDED."storageStatus",
+              "storageAttempts" = GREATEST(EXCLUDED."storageAttempts", "{SCHEMA}"."SdrDocument"."storageAttempts"),
+              "storageError" = EXCLUDED."storageError",
+              "storageUpdatedAt" = EXCLUDED."storageUpdatedAt",
+              "contentHash" = COALESCE(EXCLUDED."contentHash", "{SCHEMA}"."SdrDocument"."contentHash"),
+              "mimeType" = COALESCE(EXCLUDED."mimeType", "{SCHEMA}"."SdrDocument"."mimeType"),
+              "byteSize" = COALESCE(EXCLUDED."byteSize", "{SCHEMA}"."SdrDocument"."byteSize"),
+              "extractedJson" = COALESCE(EXCLUDED."extractedJson", "{SCHEMA}"."SdrDocument"."extractedJson"),
+              "extractionStatus" = EXCLUDED."extractionStatus"
+            RETURNING *
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                sql,
+                doc_id,
+                lead_id,
+                conversation_id or None,
+                message_id or None,
+                provider_message_id or None,
+                doc_type,
+                storage_key,
+                storage_bucket,
+                schema_status,
+                int(storage_attempts or 0),
+                storage_error,
+                created,
+                content_hash,
+                mime_type,
+                byte_size,
+                payload,
+                extract_status,
+                policy,
+                exp,
+                created,
+            )
+        return dict(row) if row else {}
+
+
+    async def mark_permanent_for_won_lead(self, lead_id: str) -> int:
+        """When lead is WON: set retentionPolicy=PERMANENT and clear expiresAt."""
+        sql = f'''
+            UPDATE "{SCHEMA}"."SdrDocument"
+            SET "retentionPolicy" = 'PERMANENT'::"{SCHEMA}"."SdrRetentionPolicy",
+                "expiresAt" = NULL
+            WHERE "leadId" = $1
+              AND "retentionPolicy" <> 'PERMANENT'::"{SCHEMA}"."SdrRetentionPolicy"
+        '''
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(sql, lead_id)
+        # asyncpg returns e.g. "UPDATE 3"
+        try:
+            return int(str(status).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    async def update_extraction(
+        self,
+        document_id: str,
+        *,
+        extracted_json: Mapping[str, Any] | None,
+        extraction_status: str = "DONE",
+        document_type: str | None = None,
+    ) -> asyncpg.Record | None:
+        status = extraction_status.upper()
+        payload = (
+            json.dumps(dict(extracted_json), ensure_ascii=False)
+            if extracted_json is not None
+            else None
+        )
+        if document_type:
+            sql = f'''
+                UPDATE "{SCHEMA}"."SdrDocument"
+                SET "extractedJson" = $2::jsonb,
+                    "extractionStatus" = $3::"{SCHEMA}"."SdrDocumentExtractionStatus",
+                    "documentType" = $4::"{SCHEMA}"."SdrDocumentType"
+                WHERE "id" = $1
+                RETURNING *
+            '''
+            args: tuple[Any, ...] = (
+                document_id,
+                payload,
+                status,
+                document_type.upper(),
+            )
+        else:
+            sql = f'''
+                UPDATE "{SCHEMA}"."SdrDocument"
+                SET "extractedJson" = $2::jsonb,
+                    "extractionStatus" = $3::"{SCHEMA}"."SdrDocumentExtractionStatus"
+                WHERE "id" = $1
+                RETURNING *
+            '''
+            args = (document_id, payload, status)
+
+        async with self._pool.acquire() as conn:
+            return await conn.fetchrow(sql, *args)
+
+    async def attach_orphans_to_lead(self, conversation_id: str, lead_id: str) -> int:
+        """Link conversation-only documents once a lead exists."""
+        sql = f'''
+            UPDATE "{SCHEMA}"."SdrDocument"
+            SET "leadId" = $2
+            WHERE "conversationId" = $1
+              AND "leadId" IS NULL
+        '''
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(sql, conversation_id, lead_id)
+        try:
+            return int(str(status).split()[-1])
+        except (ValueError, IndexError):
+            return 0

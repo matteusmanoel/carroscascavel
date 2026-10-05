@@ -1,0 +1,1420 @@
+"""Conversation + Message persistence (asyncpg, Prisma column names)."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+import asyncpg
+
+from sdr.domain.types import (
+    Actionability,
+    BusinessIntent,
+    BusinessState,
+    BusinessType,
+    ConversationCanonicalState,
+    CustomerState,
+    HandoffSignals,
+    LeadTemperature,
+    LifecycleState,
+    LifecycleStatus,
+)
+from sdr.domain.budget_status import BudgetStatus, parse_budget_status
+from sdr.domain.ownership import (
+    StaleOwnershipRevision,
+    assume_human as apply_assume_human,
+    resume_ai as apply_resume_ai,
+)
+from sdr.domain.pending_interaction import (
+    AlternativeScope,
+    PendingInteraction,
+    parse_alternative_scope,
+    parse_pending_interaction,
+)
+from sdr.domain.inbound_batch import BATCH_JSON_KEY, InboundBatch, BatchStatus, merge_turn_facts
+from sdr.domain.outbound_reservation import (
+    RESERVED_BOT_PROVIDER_LIKE,
+    is_reserved_bot_provider_id,
+    new_reserved_bot_provider_id,
+)
+
+SCHEMA = "facilcar"
+
+# Distinguishes "column omitted" (JSON-only load) from SQL NULL (authoritative).
+_COLUMN_ABSENT = object()
+
+
+def _new_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _is_unique_violation(exc: BaseException) -> bool:
+    if isinstance(exc, asyncpg.UniqueViolationError):
+        return True
+    return str(getattr(exc, "sqlstate", "") or "") == "23505"
+
+
+def _ts_to_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def _iso_to_naive(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+
+
+def _overlay(column: Any, json_value: Any) -> Any:
+    """Postgres columns win over canonicalStateJson, including SQL NULL.
+
+    Operational source of truth is ``Conversation.botStatus`` +
+    ``ownershipRevision``. JSON may lag (web assume/resume historically
+    patched columns only) and is observability, not authorization.
+
+    Reconciliation — column always wins:
+    - column ``HUMAN_ACTIVE`` + stale JSON ``BOT_ACTIVE``/``HANDOFF_SENT``
+      → load as ``HUMAN_ACTIVE`` (worker must silence)
+    - column ``HANDOFF_SENT``/``AI_RESUMED`` + stale JSON ``HUMAN_ACTIVE``
+      → load as the column (AI may talk; never send based on JSON)
+    - column NULL + JSON owner/status → NULL/column default (arbitrary
+      payload cannot flip owner or status)
+
+    JSON is consulted only when the caller omitted the column argument
+    (``_COLUMN_ABSENT``), e.g. a JSON-only replay load.
+    """
+    if column is _COLUMN_ABSENT:
+        return json_value
+    return column
+
+
+def _row_get(row: Any, key: str) -> Any:
+    try:
+        keys = row.keys()
+        if key in keys:
+            return row[key]
+    except Exception:
+        pass
+    return None
+
+
+def _row_int(row: Any, key: str) -> int | None:
+    value = _row_get(row, key)
+    if value is None:
+        return None
+    return int(value)
+
+
+def pg_update_applied(status: str | None) -> bool:
+    """True when asyncpg ``UPDATE <n>`` reports at least one row."""
+    if not status:
+        return False
+    token = str(status).strip().split()[-1]
+    try:
+        return int(token) > 0
+    except ValueError:
+        return False
+
+
+def state_from_conversation_row(row: Any) -> ConversationCanonicalState:
+    return canonical_state_from_json(
+        row["canonicalStateJson"],
+        thread_id=row["id"],
+        phone=row["phone"],
+        bot_status=row["botStatus"],
+        active_lead_ids=list(row["activeLeadIds"] or []),
+        ownership_revision=_row_int(row, "ownershipRevision"),
+        context_revision=_row_int(row, "contextRevision"),
+        assumed_by_user_id=_row_get(row, "assumedByUserId"),
+        assumed_at=_row_get(row, "assumedAt"),
+        resumed_by_user_id=_row_get(row, "resumedByUserId"),
+        resumed_at=_row_get(row, "resumedAt"),
+        resume_reason=_row_get(row, "resumeReason"),
+        handoff_at=_row_get(row, "handoffAt"),
+        vendor_notified_at=_row_get(row, "vendorNotifiedAt"),
+        wait_state=_row_get(row, "waitState"),
+        sdr_opted_out_at=_row_get(row, "sdrOptedOutAt"),
+    )
+
+
+def _followup_payload(state: ConversationCanonicalState) -> dict[str, Any]:
+    from sdr.domain.followup import followup_record, followup_record_to_dict
+
+    current = getattr(state, "followup", None)
+    if current is None:
+        return {}
+    if isinstance(current, dict):
+        return dict(current)
+    return followup_record_to_dict(followup_record(state))
+
+
+def canonical_state_to_json(state: ConversationCanonicalState) -> str:
+    payload = {
+        "thread_id": state.thread_id,
+        "language": state.language,
+        "intent": state.intent.value,
+        "customer": {
+            "phone": state.customer.phone,
+            "name": state.customer.name,
+            "name_confirmed": state.customer.name_confirmed,
+        },
+        "business": {
+            "type": state.business.type.value,
+            "actionability": state.business.actionability.value,
+        },
+        "lifecycle": {
+            "status": state.lifecycle.status.value,
+            "handoff_reason": state.lifecycle.handoff_reason,
+        },
+        "facts": state.facts,
+        "signals": state.signals.as_dict(),
+        "pending_confirmation": state.pending_confirmation,
+        "temperature": state.temperature.value if state.temperature else None,
+        "active_lead_ids": state.active_lead_ids,
+        "assistant_turn_count": state.assistant_turn_count,
+        "last_inventory_search_key": state.last_inventory_search_key,
+        "last_inventory_outcome": state.last_inventory_outcome,
+        "pending_interaction": state.pending_interaction.value,
+        "alternative_scope": state.alternative_scope.value,
+        "budget_status": state.budget_status.value,
+        "last_shown_vehicle_ids": list(state.last_shown_vehicle_ids),
+        "primary_vehicle_id": state.primary_vehicle_id,
+        "primary_vehicle_chosen_at": state.primary_vehicle_chosen_at,
+        "presented_vehicle_bindings": [
+            b.as_dict() if hasattr(b, "as_dict") else dict(b)
+            for b in (state.presented_vehicle_bindings or [])
+        ],
+        "current_offer_set_id": state.current_offer_set_id,
+        "photo_request": bool(state.photo_request),
+        "pending_question": state.pending_question,
+        "engagement_low_streak": int(state.engagement_low_streak),
+        "visit_invited": bool(state.visit_invited),
+        "visit_preferred_time": state.visit_preferred_time,
+        "visit_interest": bool(state.visit_interest),
+        "visit_declined": bool(state.visit_declined),
+        "visit_date": state.visit_date,
+        "visit_period": state.visit_period,
+        "visit_time": state.visit_time,
+        "visit_raw": state.visit_raw,
+        "visit_within_hours": state.visit_within_hours,
+        "visit_accepted_offered": bool(state.visit_accepted_offered),
+        "location_sent": bool(state.location_sent),
+        "documents_asked": bool(state.documents_asked),
+        "remaining_documents_asked": bool(getattr(state, "remaining_documents_asked", False)),
+        "enrichment_ask_count": int(getattr(state, "enrichment_ask_count", 0) or 0),
+        "presented_vehicle_catalog": dict(getattr(state, "presented_vehicle_catalog", None) or {}),
+        "installment_asked": bool(state.installment_asked),
+        "installment_mismatch_offered": bool(state.installment_mismatch_offered),
+        "installment_capacity": state.installment_capacity,
+        "last_shown_price_cash": state.last_shown_price_cash,
+        "deferred_fields": list(state.deferred_fields),
+        "offered_visit_slots": list(state.offered_visit_slots),
+        "listing_reference": state.listing_reference,
+        "last_inventory_match": state.last_inventory_match,
+        "last_visual_resolution": getattr(state, "last_visual_resolution", None),
+        "crm_revision": int(getattr(state, "crm_revision", 0) or 0),
+        "ownership_revision": int(getattr(state, "ownership_revision", 0) or 0),
+        "context_revision": int(getattr(state, "context_revision", 0) or 0),
+        "assumed_by_user_id": state.assumed_by_user_id,
+        "assumed_at": state.assumed_at,
+        "resumed_by_user_id": state.resumed_by_user_id,
+        "resumed_at": state.resumed_at,
+        "resume_reason": state.resume_reason,
+        "handoff_at": state.handoff_at,
+        "vendor_notified_at": state.vendor_notified_at,
+        "handoff_ready": state.handoff_ready,
+        "profile_complete": state.profile_complete,
+        "missing_fields": list(state.missing_fields),
+        "collected_fields": list(state.collected_fields),
+        "wait_state": getattr(state, "wait_state", None) or "ACTIVE_QUALIFICATION",
+        "followup": _followup_payload(state),
+        "sdr_opted_out_at": getattr(state, "sdr_opted_out_at", None),
+    }
+    return json.dumps(payload)
+
+
+def canonical_state_from_json(
+    raw: Any,
+    *,
+    thread_id: str,
+    phone: str,
+    bot_status: Any = _COLUMN_ABSENT,
+    active_lead_ids: list[str] | None = None,
+    ownership_revision: Any = _COLUMN_ABSENT,
+    context_revision: Any = _COLUMN_ABSENT,
+    assumed_by_user_id: Any = _COLUMN_ABSENT,
+    assumed_at: Any = _COLUMN_ABSENT,
+    resumed_by_user_id: Any = _COLUMN_ABSENT,
+    resumed_at: Any = _COLUMN_ABSENT,
+    resume_reason: Any = _COLUMN_ABSENT,
+    handoff_at: Any = _COLUMN_ABSENT,
+    vendor_notified_at: Any = _COLUMN_ABSENT,
+    wait_state: Any = _COLUMN_ABSENT,
+    sdr_opted_out_at: Any = _COLUMN_ABSENT,
+) -> ConversationCanonicalState:
+    data: dict[str, Any]
+    if raw is None:
+        data = {}
+    elif isinstance(raw, str):
+        data = json.loads(raw) if raw else {}
+    elif isinstance(raw, dict):
+        data = raw
+    else:
+        # asyncpg may return JSONB as str/dict depending on codec
+        data = dict(raw)
+
+    customer_raw = data.get("customer") or {}
+    business_raw = data.get("business") or {}
+    lifecycle_raw = data.get("lifecycle") or {}
+    signals_raw = data.get("signals") or {}
+
+    status_value = _overlay(bot_status, lifecycle_raw.get("status")) or LifecycleStatus.BOT_ACTIVE.value
+    try:
+        status = LifecycleStatus(status_value)
+    except ValueError:
+        status = LifecycleStatus.BOT_ACTIVE
+
+    intent_value = data.get("intent") or BusinessIntent.UNKNOWN.value
+    try:
+        intent = BusinessIntent(intent_value)
+    except ValueError:
+        intent = BusinessIntent.UNKNOWN
+
+    try:
+        btype = BusinessType(business_raw.get("type") or BusinessType.UNKNOWN.value)
+    except ValueError:
+        btype = BusinessType.UNKNOWN
+
+    try:
+        actionability = Actionability(
+            business_raw.get("actionability") or Actionability.INSUFFICIENT.value
+        )
+    except ValueError:
+        actionability = Actionability.INSUFFICIENT
+
+    temp = data.get("temperature")
+    temperature = None
+    if temp:
+        try:
+            temperature = LeadTemperature(temp)
+        except ValueError:
+            temperature = None
+
+    return ConversationCanonicalState(
+        thread_id=data.get("thread_id") or thread_id,
+        language=data.get("language") or "unknown",
+        intent=intent,
+        customer=CustomerState(
+            phone=customer_raw.get("phone") or phone,
+            name=customer_raw.get("name"),
+            name_confirmed=bool(customer_raw.get("name_confirmed") or False),
+        ),
+        business=BusinessState(type=btype, actionability=actionability),
+        lifecycle=LifecycleState(
+            status=status,
+            handoff_reason=lifecycle_raw.get("handoff_reason"),
+        ),
+        facts=dict(data.get("facts") or {}),
+        signals=HandoffSignals(
+            explicit_handoff=signals_raw.get("explicit_handoff"),
+            explicit_offer=signals_raw.get("explicit_offer"),
+            visit_intent=signals_raw.get("visit_intent"),
+            high_purchase_intent=signals_raw.get("high_purchase_intent"),
+            sensitive_data_refusal=signals_raw.get("sensitive_data_refusal"),
+        ),
+        pending_confirmation=list(data.get("pending_confirmation") or []),
+        temperature=temperature,
+        active_lead_ids=list(active_lead_ids or data.get("active_lead_ids") or []),
+        assistant_turn_count=int(data.get("assistant_turn_count") or 0),
+        last_inventory_search_key=data.get("last_inventory_search_key") or None,
+        last_inventory_outcome=data.get("last_inventory_outcome") or None,
+        pending_interaction=parse_pending_interaction(data.get("pending_interaction")),
+        alternative_scope=parse_alternative_scope(data.get("alternative_scope"))
+        or AlternativeScope.NONE,
+        budget_status=parse_budget_status(data.get("budget_status")) or BudgetStatus.UNKNOWN,
+        last_shown_vehicle_ids=[
+            str(v) for v in (data.get("last_shown_vehicle_ids") or []) if v
+        ],
+        primary_vehicle_id=(str(data["primary_vehicle_id"]) if data.get("primary_vehicle_id") else None),
+        primary_vehicle_chosen_at=(
+            float(data["primary_vehicle_chosen_at"])
+            if data.get("primary_vehicle_chosen_at") is not None
+            else None
+        ),
+        presented_vehicle_bindings=list(data.get("presented_vehicle_bindings") or []),
+        current_offer_set_id=(str(data["current_offer_set_id"]) if data.get("current_offer_set_id") else None),
+        photo_request=bool(data.get("photo_request") or False),
+        pending_question=data.get("pending_question") or None,
+        engagement_low_streak=int(data.get("engagement_low_streak") or 0),
+        visit_invited=bool(data.get("visit_invited") or False),
+        visit_preferred_time=data.get("visit_preferred_time") or None,
+        visit_interest=bool(data.get("visit_interest") or False),
+        visit_declined=bool(data.get("visit_declined") or False),
+        visit_date=data.get("visit_date") or None,
+        visit_period=data.get("visit_period") or None,
+        visit_time=data.get("visit_time") or None,
+        visit_raw=data.get("visit_raw") or None,
+        visit_within_hours=(
+            bool(data["visit_within_hours"])
+            if data.get("visit_within_hours") is not None
+            else None
+        ),
+        visit_accepted_offered=bool(data.get("visit_accepted_offered") or False),
+        location_sent=bool(data.get("location_sent") or False),
+        documents_asked=bool(data.get("documents_asked") or False),
+        remaining_documents_asked=bool(data.get("remaining_documents_asked") or False),
+        enrichment_ask_count=int(data.get("enrichment_ask_count") or 0),
+        presented_vehicle_catalog=dict(data.get("presented_vehicle_catalog") or {}),
+        installment_asked=bool(data.get("installment_asked") or False),
+        installment_mismatch_offered=bool(data.get("installment_mismatch_offered") or False),
+        installment_capacity=(
+            float(data["installment_capacity"])
+            if data.get("installment_capacity") is not None
+            else None
+        ),
+        last_shown_price_cash=(
+            float(data["last_shown_price_cash"])
+            if data.get("last_shown_price_cash") is not None
+            else None
+        ),
+        deferred_fields=list(data.get("deferred_fields") or []),
+        offered_visit_slots=list(data.get("offered_visit_slots") or []),
+        listing_reference=data.get("listing_reference") or None,
+        last_inventory_match=(
+            dict(data["last_inventory_match"])
+            if isinstance(data.get("last_inventory_match"), dict)
+            else None
+        ),
+        last_visual_resolution=(
+            dict(data["last_visual_resolution"])
+            if isinstance(data.get("last_visual_resolution"), dict)
+            else None
+        ),
+        crm_revision=int(data.get("crm_revision") or 0),
+        ownership_revision=int(
+            _overlay(ownership_revision, data.get("ownership_revision")) or 0
+        ),
+        context_revision=int(
+            _overlay(context_revision, data.get("context_revision")) or 0
+        ),
+        assumed_by_user_id=_overlay(assumed_by_user_id, data.get("assumed_by_user_id")),
+        assumed_at=_ts_to_iso(_overlay(assumed_at, data.get("assumed_at"))),
+        resumed_by_user_id=_overlay(resumed_by_user_id, data.get("resumed_by_user_id")),
+        resumed_at=_ts_to_iso(_overlay(resumed_at, data.get("resumed_at"))),
+        resume_reason=_overlay(resume_reason, data.get("resume_reason")),
+        handoff_at=_ts_to_iso(_overlay(handoff_at, data.get("handoff_at"))),
+        vendor_notified_at=_ts_to_iso(
+            _overlay(vendor_notified_at, data.get("vendor_notified_at"))
+        ),
+        handoff_ready=bool(data.get("handoff_ready") or False),
+        profile_complete=bool(data.get("profile_complete") or False),
+        missing_fields=list(data.get("missing_fields") or []),
+        collected_fields=list(data.get("collected_fields") or []),
+        wait_state=str(
+            _overlay(wait_state, data.get("wait_state")) or "ACTIVE_QUALIFICATION"
+        ),
+        followup=data.get("followup"),
+        sdr_opted_out_at=_ts_to_iso(
+            _overlay(sdr_opted_out_at, data.get("sdr_opted_out_at"))
+        ),
+    )
+
+
+class ConversationRepository:
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def get_by_phone(
+        self, phone: str, *, instance_name: str
+    ) -> asyncpg.Record | None:
+        sql = f'''
+            SELECT *
+            FROM "{SCHEMA}"."Conversation"
+            WHERE "phone" = $1 AND "instanceName" = $2
+            LIMIT 1
+        '''
+        async with self._pool.acquire() as conn:
+            return await conn.fetchrow(sql, phone, instance_name)
+
+    async def get_by_id(self, conversation_id: str) -> asyncpg.Record | None:
+        sql = f'''SELECT * FROM "{SCHEMA}"."Conversation" WHERE "id" = $1'''
+        async with self._pool.acquire() as conn:
+            return await conn.fetchrow(sql, conversation_id)
+
+    async def upsert_conversation(
+        self,
+        *,
+        phone: str,
+        instance_name: str,
+        language: str | None = None,
+    ) -> asyncpg.Record:
+        existing = await self.get_by_phone(phone, instance_name=instance_name)
+        if existing:
+            return existing
+        cid = _new_id()
+        now = _now()
+        sql = f'''
+            INSERT INTO "{SCHEMA}"."Conversation"
+              ("id", "phone", "instanceName", "botStatus", "language",
+               "activeLeadIds", "createdAt", "updatedAt")
+            VALUES ($1, $2, $3, 'BOT_ACTIVE', $4, ARRAY[]::TEXT[], $5, $5)
+            ON CONFLICT ("instanceName", "phone") DO UPDATE
+              SET "updatedAt" = EXCLUDED."updatedAt"
+            RETURNING *
+        '''
+        async with self._pool.acquire() as conn:
+            return await conn.fetchrow(sql, cid, phone, instance_name, language, now)
+
+    async def save_canonical_state(
+        self,
+        conversation_id: str,
+        state: ConversationCanonicalState,
+    ) -> bool:
+        """Persist a worker snapshot only if live ownership still matches.
+
+        CAS: ``ownershipRevision`` must equal the snapshot and ``botStatus``
+        must not be ``HUMAN_ACTIVE``. A concurrent Assumir increments the
+        revision and sets ``HUMAN_ACTIVE``; this UPDATE then matches zero
+        rows so the worker cannot restore AI lifecycle and send.
+
+        ``SET "ownershipRevision" = $7`` with ``WHERE "ownershipRevision" = $7``
+        cannot decrement: a higher live revision fails the predicate
+        (``UPDATE 0``). Do not weaken these predicates.
+        """
+        now = _now()
+        expected_revision = int(state.ownership_revision or 0)
+        sql = f'''
+            UPDATE "{SCHEMA}"."Conversation"
+            SET "canonicalStateJson" = $2::jsonb,
+                "botStatus" = $3::"{SCHEMA}"."ConversationBotStatus",
+                "language" = $4,
+                "activeLeadIds" = $5,
+                "handoffAt" = CASE
+                    WHEN $3::text IN ('HANDOFF_SENT', 'HUMAN_ACTIVE', 'AI_RESUMED')
+                         AND "handoffAt" IS NULL THEN $6
+                    ELSE "handoffAt"
+                END,
+                "ownershipRevision" = $7,
+                "assumedByUserId" = $8,
+                "assumedAt" = $9,
+                "resumedByUserId" = $10,
+                "resumedAt" = $11,
+                "resumeReason" = $12,
+                "vendorNotifiedAt" = CASE
+                    WHEN $13::timestamp IS NOT NULL AND "vendorNotifiedAt" IS NULL THEN $13
+                    ELSE "vendorNotifiedAt"
+                END,
+                "waitState" = $14,
+                "sdrOptedOutAt" = CASE
+                    WHEN $15::timestamp IS NOT NULL THEN COALESCE("sdrOptedOutAt", $15)
+                    ELSE "sdrOptedOutAt"
+                END,
+                "contextRevision" = $16,
+                "updatedAt" = $6
+            WHERE "id" = $1
+              AND "ownershipRevision" = $7
+              AND "botStatus" <> 'HUMAN_ACTIVE'
+        '''
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                sql,
+                conversation_id,
+                canonical_state_to_json(state),
+                state.lifecycle.status.value,
+                state.language if state.language != "unknown" else None,
+                state.active_lead_ids,
+                now,
+                expected_revision,
+                state.assumed_by_user_id,
+                _iso_to_naive(state.assumed_at),
+                state.resumed_by_user_id,
+                _iso_to_naive(state.resumed_at),
+                state.resume_reason,
+                _iso_to_naive(state.vendor_notified_at),
+                getattr(state, "wait_state", None),
+                _iso_to_naive(getattr(state, "sdr_opted_out_at", None)),
+                int(getattr(state, "context_revision", 0) or 0),
+            )
+        return pg_update_applied(status)
+
+    async def load_canonical_state(
+        self, conversation_id: str
+    ) -> ConversationCanonicalState | None:
+        row = await self.get_by_id(conversation_id)
+        if row is None:
+            return None
+        return state_from_conversation_row(row)
+
+    async def assume_human(
+        self,
+        conversation_id: str,
+        *,
+        actor_user_id: str,
+        expected_revision: int,
+    ) -> ConversationCanonicalState:
+        """CAS assume: HUMAN_ACTIVE. Never mutates Lead.status."""
+        state = await self.load_canonical_state(conversation_id)
+        if state is None:
+            raise StaleOwnershipRevision(f"conversation {conversation_id} not found")
+        next_state = apply_assume_human(
+            state, actor_user_id=actor_user_id, expected_revision=expected_revision
+        )
+        if next_state.ownership_revision == expected_revision:
+            return next_state
+        sql = f'''
+            UPDATE "{SCHEMA}"."Conversation"
+            SET "canonicalStateJson" = $2::jsonb,
+                "botStatus" = 'HUMAN_ACTIVE'::"{SCHEMA}"."ConversationBotStatus",
+                "ownershipRevision" = "ownershipRevision" + 1,
+                "assumedByUserId" = $3,
+                "assumedAt" = $4,
+                "updatedAt" = $4
+            WHERE "id" = $1 AND "ownershipRevision" = $5
+            RETURNING *
+        '''
+        now = _iso_to_naive(next_state.assumed_at) or _now()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                sql,
+                conversation_id,
+                canonical_state_to_json(next_state),
+                actor_user_id,
+                now,
+                expected_revision,
+            )
+        if row is None:
+            raise StaleOwnershipRevision(
+                f"stale ownershipRevision={expected_revision} for {conversation_id}"
+            )
+        return state_from_conversation_row(row)
+
+    async def resume_ai(
+        self,
+        conversation_id: str,
+        *,
+        actor_user_id: str,
+        reason: str,
+        expected_revision: int,
+    ) -> ConversationCanonicalState:
+        """CAS resume: AI_RESUMED. Never mutates Lead.status or re-sends handoff."""
+        state = await self.load_canonical_state(conversation_id)
+        if state is None:
+            raise StaleOwnershipRevision(f"conversation {conversation_id} not found")
+        next_state = apply_resume_ai(
+            state,
+            actor_user_id=actor_user_id,
+            reason=reason,
+            expected_revision=expected_revision,
+        )
+        if next_state.ownership_revision == expected_revision:
+            return next_state
+        sql = f'''
+            UPDATE "{SCHEMA}"."Conversation"
+            SET "canonicalStateJson" = $2::jsonb,
+                "botStatus" = 'AI_RESUMED'::"{SCHEMA}"."ConversationBotStatus",
+                "ownershipRevision" = "ownershipRevision" + 1,
+                "resumedByUserId" = $3,
+                "resumedAt" = $4,
+                "resumeReason" = $5,
+                "updatedAt" = $4
+            WHERE "id" = $1 AND "ownershipRevision" = $6
+            RETURNING *
+        '''
+        now = _iso_to_naive(next_state.resumed_at) or _now()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                sql,
+                conversation_id,
+                canonical_state_to_json(next_state),
+                actor_user_id,
+                now,
+                reason,
+                expected_revision,
+            )
+        if row is None:
+            raise StaleOwnershipRevision(
+                f"stale ownershipRevision={expected_revision} for {conversation_id}"
+            )
+        return state_from_conversation_row(row)
+
+    async def reset_conversation_memory(
+        self,
+        conversation_id: str,
+        *,
+        phone: str,
+    ) -> ConversationCanonicalState:
+        """Wipe conversational memory for a thread — fresh BOT_ACTIVE state.
+
+        Clears canonical JSON, summary, handoff, and active lead links on the
+        Conversation row. Does not delete historical Message/Lead rows (audit).
+        Does not clear ``sdrOptedOutAt`` — opt-out survives ``/deletar``.
+        """
+        fresh = ConversationCanonicalState(
+            thread_id=conversation_id,
+            customer=CustomerState(phone=phone),
+        )
+        now = _now()
+        sql = f'''
+            UPDATE "{SCHEMA}"."Conversation"
+            SET "canonicalStateJson" = $2::jsonb,
+                "botStatus" = 'BOT_ACTIVE'::"{SCHEMA}"."ConversationBotStatus",
+                "language" = NULL,
+                "accumulatedSummary" = NULL,
+                "activeLeadIds" = ARRAY[]::TEXT[],
+                "handoffAt" = NULL,
+                "vendorNotifiedAt" = NULL,
+                "ownershipRevision" = 0,
+                "assumedByUserId" = NULL,
+                "assumedAt" = NULL,
+                "resumedByUserId" = NULL,
+                "resumedAt" = NULL,
+                "resumeReason" = NULL,
+                "waitState" = NULL,
+                "updatedAt" = $3
+            WHERE "id" = $1
+            RETURNING "sdrOptedOutAt"
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                sql,
+                conversation_id,
+                canonical_state_to_json(fresh),
+                now,
+            )
+        opted = _row_get(row, "sdrOptedOutAt") if row is not None else None
+        if opted is not None:
+            fresh.sdr_opted_out_at = _ts_to_iso(opted)
+            from sdr.domain.followup import followup_record, PauseReason
+
+            record = followup_record(fresh)
+            record.opted_out = True
+            record.pause_reason = PauseReason.OPT_OUT
+        return fresh
+
+    async def list_pending_messages(self, *, limit: int = 20) -> list[asyncpg.Record]:
+        sql = f'''
+            SELECT m.*, c."phone" AS "conversationPhone",
+                   c."botStatus" AS "conversationBotStatus",
+                   c."instanceName" AS "conversationInstance"
+            FROM "{SCHEMA}"."Message" m
+            JOIN "{SCHEMA}"."Conversation" c ON c."id" = m."conversationId"
+            WHERE m."processingStatus" = 'PENDING'
+              AND m."direction" = 'INBOUND'
+              AND m."fromMe" = false
+            ORDER BY m."createdAt" ASC
+            LIMIT $1
+        '''
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, limit)
+            return list(rows)
+
+    async def list_batch_work_seeds(self, *, limit: int = 20) -> list[asyncpg.Record]:
+        """One seed row per conversation that needs a coalesce pass.
+
+        Prefers ERROR batches awaiting retry (outbound not confirmed), then
+        oldest PENDING. Does not load every PENDING of a conversation here —
+        claim happens after quiet window with an explicit cutoff.
+        """
+        sql = f'''
+            WITH ranked AS (
+              SELECT m.*, c."phone" AS "conversationPhone",
+                     c."botStatus" AS "conversationBotStatus",
+                     c."instanceName" AS "conversationInstance",
+                     ROW_NUMBER() OVER (
+                       PARTITION BY m."conversationId"
+                       ORDER BY
+                         CASE
+                           WHEN m."processingStatus" = 'ERROR'
+                                AND COALESCE(
+                                      m."turnFactsJson"->'_sdr_batch'->'result'->>'outbound_sent',
+                                      'false'
+                                    ) <> 'true'
+                           THEN 0
+                           WHEN m."processingStatus" = 'PENDING' THEN 1
+                           ELSE 2
+                         END,
+                         m."createdAt" ASC,
+                         m."id" ASC
+                     ) AS rn
+              FROM "{SCHEMA}"."Message" m
+              JOIN "{SCHEMA}"."Conversation" c ON c."id" = m."conversationId"
+              WHERE m."direction" = 'INBOUND'
+                AND m."fromMe" = false
+                AND (
+                  m."processingStatus" = 'PENDING'
+                  OR (
+                    m."processingStatus" = 'ERROR'
+                    AND m."turnFactsJson" ? '_sdr_batch'
+                    AND COALESCE(
+                          m."turnFactsJson"->'_sdr_batch'->'result'->>'outbound_sent',
+                          'false'
+                        ) <> 'true'
+                  )
+                )
+            )
+            SELECT * FROM ranked WHERE rn = 1
+            ORDER BY "createdAt" ASC
+            LIMIT $1
+        '''
+        async with self._pool.acquire() as conn:
+            return list(await conn.fetch(sql, limit))
+
+    async def list_pending_inbound_up_to(
+        self,
+        conversation_id: str,
+        *,
+        cutoff: datetime,
+    ) -> list[asyncpg.Record]:
+        """PENDING inbound for conversation with createdAt <= cutoff."""
+        cutoff_naive = cutoff
+        if cutoff.tzinfo is not None:
+            cutoff_naive = cutoff.astimezone(timezone.utc).replace(tzinfo=None)
+        sql = f'''
+            SELECT *
+            FROM "{SCHEMA}"."Message"
+            WHERE "conversationId" = $1
+              AND "processingStatus" = 'PENDING'
+              AND "direction" = 'INBOUND'
+              AND "fromMe" = false
+              AND "createdAt" <= $2
+            ORDER BY "createdAt" ASC, "id" ASC
+        '''
+        async with self._pool.acquire() as conn:
+            return list(await conn.fetch(sql, conversation_id, cutoff_naive))
+
+    async def get_messages_by_ids(self, message_ids: list[str]) -> list[asyncpg.Record]:
+        if not message_ids:
+            return []
+        sql = f'''
+            SELECT *
+            FROM "{SCHEMA}"."Message"
+            WHERE "id" = ANY($1::text[])
+        '''
+        async with self._pool.acquire() as conn:
+            rows = list(await conn.fetch(sql, message_ids))
+        # Preserve caller canonical order.
+        by_id = {str(r["id"]): r for r in rows}
+        return [by_id[mid] for mid in message_ids if mid in by_id]
+
+    async def claim_inbound_batch(
+        self,
+        *,
+        conversation_id: str,
+        cutoff: datetime,
+        batch_id: str,
+        phone: str,
+        instance_name: str,
+        message_ids: list[str] | None = None,
+    ) -> list[asyncpg.Record]:
+        """Atomically claim PENDING rows with createdAt <= cutoff → PROCESSING.
+
+        When ``message_ids`` is provided, only that partition is claimed (used so
+        ``/deletar`` stays in its own batch). Returns claimed rows in canonical
+        order. Empty if nothing to claim.
+        """
+        import json as _json
+
+        if message_ids is not None and not message_ids:
+            return []
+
+        cutoff_naive = cutoff
+        if cutoff.tzinfo is not None:
+            cutoff_naive = cutoff.astimezone(timezone.utc).replace(tzinfo=None)
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                if message_ids is not None:
+                    rows = list(
+                        await conn.fetch(
+                            f'''
+                            SELECT *
+                            FROM "{SCHEMA}"."Message"
+                            WHERE "conversationId" = $1
+                              AND "processingStatus" = 'PENDING'
+                              AND "direction" = 'INBOUND'
+                              AND "fromMe" = false
+                              AND "createdAt" <= $2
+                              AND "id" = ANY($3::text[])
+                            ORDER BY "createdAt" ASC, "id" ASC
+                            FOR UPDATE SKIP LOCKED
+                            ''',
+                            conversation_id,
+                            cutoff_naive,
+                            message_ids,
+                        )
+                    )
+                else:
+                    rows = list(
+                        await conn.fetch(
+                            f'''
+                            SELECT *
+                            FROM "{SCHEMA}"."Message"
+                            WHERE "conversationId" = $1
+                              AND "processingStatus" = 'PENDING'
+                              AND "direction" = 'INBOUND'
+                              AND "fromMe" = false
+                              AND "createdAt" <= $2
+                            ORDER BY "createdAt" ASC, "id" ASC
+                            FOR UPDATE SKIP LOCKED
+                            ''',
+                            conversation_id,
+                            cutoff_naive,
+                        )
+                    )
+                if not rows:
+                    return []
+                message_ids = [str(r["id"]) for r in rows]
+                anchor = message_ids[0]
+                batch = InboundBatch(
+                    batch_id=batch_id,
+                    conversation_id=conversation_id,
+                    phone=phone,
+                    instance_name=instance_name,
+                    anchor_message_id=anchor,
+                    cutoff=cutoff_naive,
+                    message_ids=message_ids,
+                    segments=[],
+                    status=BatchStatus.PROCESSING,
+                )
+                for order, row in enumerate(rows):
+                    payload = {BATCH_JSON_KEY: batch.member_payload(str(row["id"]), order=order)}
+                    merged = _json.dumps(
+                        merge_turn_facts(row["turnFactsJson"], payload),
+                        ensure_ascii=False,
+                    )
+                    await conn.execute(
+                        f'''
+                        UPDATE "{SCHEMA}"."Message"
+                        SET "processingStatus" = 'PROCESSING',
+                            "turnFactsJson" = $2::jsonb
+                        WHERE "id" = $1
+                          AND "processingStatus" = 'PENDING'
+                        ''',
+                        str(row["id"]),
+                        merged,
+                    )
+                claimed = list(
+                    await conn.fetch(
+                        f'''
+                        SELECT * FROM "{SCHEMA}"."Message"
+                        WHERE "id" = ANY($1::text[])
+                        ORDER BY "createdAt" ASC, "id" ASC
+                        ''',
+                        message_ids,
+                    )
+                )
+                return claimed
+
+    async def reclaim_error_batch(
+        self,
+        *,
+        message_ids: list[str],
+        batch_meta: dict,
+    ) -> list[asyncpg.Record]:
+        """Re-claim the exact ERROR batch membership for retry (same IDs)."""
+        import json as _json
+
+        if not message_ids:
+            return []
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                rows = list(
+                    await conn.fetch(
+                        f'''
+                        SELECT * FROM "{SCHEMA}"."Message"
+                        WHERE "id" = ANY($1::text[])
+                        ORDER BY "createdAt" ASC, "id" ASC
+                        FOR UPDATE
+                        ''',
+                        message_ids,
+                    )
+                )
+                result = (batch_meta.get("result") or {}) if isinstance(batch_meta, dict) else {}
+                if result.get("outbound_sent") is True:
+                    return rows
+                for order, row in enumerate(rows):
+                    meta = dict(batch_meta)
+                    meta["order"] = order
+                    meta["status"] = "PROCESSING"
+                    merged = _json.dumps(
+                        merge_turn_facts(row["turnFactsJson"], {BATCH_JSON_KEY: meta}),
+                        ensure_ascii=False,
+                    )
+                    await conn.execute(
+                        f'''
+                        UPDATE "{SCHEMA}"."Message"
+                        SET "processingStatus" = 'PROCESSING',
+                            "turnFactsJson" = $2::jsonb
+                        WHERE "id" = $1
+                        ''',
+                        str(row["id"]),
+                        merged,
+                    )
+                return list(
+                    await conn.fetch(
+                        f'''
+                        SELECT * FROM "{SCHEMA}"."Message"
+                        WHERE "id" = ANY($1::text[])
+                        ORDER BY "createdAt" ASC, "id" ASC
+                        ''',
+                        message_ids,
+                    )
+                )
+
+    async def merge_message_turn_facts(
+        self,
+        message_ids: list[str],
+        patch: dict[str, Any],
+    ) -> None:
+        """Merge JSON into Message.turnFactsJson without changing processingStatus."""
+        import json as _json
+
+        if not message_ids or not patch:
+            return
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f'''SELECT "id", "turnFactsJson" FROM "{SCHEMA}"."Message"
+                    WHERE "id" = ANY($1::text[])''',
+                message_ids,
+            )
+            for row in rows:
+                merged = _json.dumps(
+                    merge_turn_facts(row["turnFactsJson"], patch),
+                    ensure_ascii=False,
+                )
+                await conn.execute(
+                    f'''
+                    UPDATE "{SCHEMA}"."Message"
+                    SET "turnFactsJson" = $2::jsonb
+                    WHERE "id" = $1
+                    ''',
+                    str(row["id"]),
+                    merged,
+                )
+
+    async def finalize_batch_messages(
+        self,
+        message_ids: list[str],
+        *,
+        status: str,
+        batch_patch: dict,
+    ) -> None:
+        """Set status + merge ``_sdr_batch`` on every member (preserves ``_sdr_media``)."""
+        import json as _json
+
+        if not message_ids:
+            return
+        now = _now()
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    f'''SELECT "id", "turnFactsJson" FROM "{SCHEMA}"."Message"
+                        WHERE "id" = ANY($1::text[])''',
+                    message_ids,
+                )
+                for row in rows:
+                    merged = _json.dumps(
+                        merge_turn_facts(
+                            row["turnFactsJson"], {BATCH_JSON_KEY: batch_patch}
+                        ),
+                        ensure_ascii=False,
+                    )
+                    await conn.execute(
+                        f'''
+                        UPDATE "{SCHEMA}"."Message"
+                        SET "processingStatus" = $2,
+                            "processedAt" = $3,
+                            "turnFactsJson" = $4::jsonb
+                        WHERE "id" = $1
+                        ''',
+                        str(row["id"]),
+                        status,
+                        now,
+                        merged,
+                    )
+
+    async def mark_message_processed(
+        self,
+        message_id: str,
+        *,
+        status: str = "DONE",
+        turn_facts_json: str | None = None,
+    ) -> None:
+        now = _now()
+        if turn_facts_json is None:
+            sql = f'''
+                UPDATE "{SCHEMA}"."Message"
+                SET "processingStatus" = $2,
+                    "processedAt" = $3
+                WHERE "id" = $1
+            '''
+            async with self._pool.acquire() as conn:
+                await conn.execute(sql, message_id, status, now)
+            return
+
+        # Merge into existing JSON so _sdr_media / _sdr_batch survive.
+        from sdr.domain.inbound_batch import merge_turn_facts
+        import json as _json
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f'''SELECT "turnFactsJson" FROM "{SCHEMA}"."Message" WHERE "id" = $1''',
+                message_id,
+            )
+            existing = row["turnFactsJson"] if row else None
+            try:
+                patch = _json.loads(turn_facts_json)
+            except Exception:
+                patch = {"_raw": turn_facts_json}
+            if not isinstance(patch, dict):
+                patch = {"value": patch}
+            merged = _json.dumps(merge_turn_facts(existing, patch), ensure_ascii=False)
+            await conn.execute(
+                f'''
+                UPDATE "{SCHEMA}"."Message"
+                SET "processingStatus" = $2,
+                    "processedAt" = $3,
+                    "turnFactsJson" = $4::jsonb
+                WHERE "id" = $1
+                ''',
+                message_id,
+                status,
+                now,
+                merged,
+            )
+
+    async def mark_message_skipped(self, message_id: str, *, reason: str) -> None:
+        await self.mark_message_processed(
+            message_id,
+            status=f"SKIPPED:{reason}"[:64],
+        )
+
+    async def save_transcription(self, message_id: str, transcription: str) -> None:
+        """Persist Whisper transcription result on the Message row."""
+        sql = f'''
+            UPDATE "{SCHEMA}"."Message"
+            SET "transcription" = $2
+            WHERE "id" = $1
+        '''
+        async with self._pool.acquire() as conn:
+            await conn.execute(sql, message_id, transcription)
+
+    async def set_media_storage_key(self, message_id: str, key: str | None) -> None:
+        """Set Message.mediaStorageKey only after a successful private upload."""
+        if not message_id or not key:
+            return
+        sql = f'''
+            UPDATE "{SCHEMA}"."Message"
+            SET "mediaStorageKey" = $2
+            WHERE "id" = $1
+              AND ("mediaStorageKey" IS NULL OR "mediaStorageKey" = $2)
+        '''
+        async with self._pool.acquire() as conn:
+            await conn.execute(sql, message_id, key)
+
+    async def list_recent_turns(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 5,
+        exclude_message_ids: list[str] | None = None,
+    ) -> list[dict[str, str]]:
+        """Return the last ``limit`` messages as [{role, text}] for LLM context.
+
+        Only messages with non-empty text are included. Outbound bot messages
+        are labeled "julia"; inbound customer messages are labeled "customer".
+        Order: oldest first (chronological), so the LLM sees the natural flow.
+
+        ``exclude_message_ids``: Prisma Message ids (cuid / text) of the current
+        inbound batch. These rows are excluded so the current turn's messages
+        are not duplicated in the history that the Understanding LLM receives
+        alongside the live inbound. Cast as text[] — Message.id is not uuid.
+        """
+        if exclude_message_ids:
+            sql = f'''
+                SELECT "direction", "fromMe", "isBotSent", "text"
+                FROM "{SCHEMA}"."Message"
+                WHERE "conversationId" = $1
+                  AND "text" IS NOT NULL
+                  AND "text" <> ''
+                  AND "id" != ALL($3::text[])
+                ORDER BY "createdAt" DESC, "id" DESC
+                LIMIT $2
+            '''
+            async with self._pool.acquire() as conn:
+                rows = list(await conn.fetch(sql, conversation_id, limit, exclude_message_ids))
+        else:
+            sql = f'''
+                SELECT "direction", "fromMe", "isBotSent", "text"
+                FROM "{SCHEMA}"."Message"
+                WHERE "conversationId" = $1
+                  AND "text" IS NOT NULL
+                  AND "text" <> ''
+                ORDER BY "createdAt" DESC, "id" DESC
+                LIMIT $2
+            '''
+            async with self._pool.acquire() as conn:
+                rows = list(await conn.fetch(sql, conversation_id, limit))
+
+        turns: list[dict[str, str]] = []
+        for row in reversed(rows):
+            text = str(row["text"] or "").strip()
+            if not text:
+                continue
+            direction = str(row["direction"] or "")
+            is_bot = bool(row["isBotSent"] or False)
+            from_me = bool(row["fromMe"] or False)
+            if direction == "OUTBOUND" and (is_bot or from_me):
+                role = "julia"
+            else:
+                role = "customer"
+            turns.append({"role": role, "text": text})
+        return turns
+
+    async def fetch_first_customer_text(self, conversation_id: str) -> str | None:
+        """First real customer inbound — never a bot/outbound bubble."""
+        sql = f'''
+            SELECT COALESCE(NULLIF(btrim(m."text"), ''), NULLIF(btrim(m."transcription"), '')) AS body
+            FROM "{SCHEMA}"."Message" m
+            WHERE m."conversationId" = $1
+              AND m."direction" = 'INBOUND'
+              AND m."fromMe" = false
+              AND COALESCE(m."isBotSent", false) = false
+            ORDER BY m."createdAt" ASC, m."id" ASC
+            LIMIT 1
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(sql, conversation_id)
+        if row is None:
+            return None
+        body = str(row["body"] or "").strip()
+        return body or None
+
+    async def insert_bot_outbound(
+        self,
+        *,
+        conversation_id: str,
+        instance_name: str,
+        text: str,
+        provider_message_id: str | None = None,
+        content_type: str = "TEXT",
+        presented_vehicle: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist Júlia outbound with isBotSent so fromMe echoes are not human.
+
+        Correlation key is ``(instanceName, providerMessageId)``. Callers must
+        insert a reserved ``bot-pending-{uuid}`` id **before** Evolution send,
+        then ``update_bot_provider_id`` after the transport returns. Duplicate
+        Evolution deliveries hit ON CONFLICT and must not be treated as a
+        seller. Empty provider ids are reserved so the row stays correlatable.
+        """
+        now = _now()
+        msg_id = str(uuid.uuid4())
+        provider_id = (provider_message_id or "").strip() or new_reserved_bot_provider_id()
+        ctype = (content_type or "TEXT").upper()
+        if ctype not in {"TEXT", "IMAGE", "AUDIO", "DOCUMENT", "VIDEO", "STICKER"}:
+            ctype = "TEXT"
+        turn_facts = None
+        if presented_vehicle:
+            turn_facts = json.dumps({"_sdr_presented_vehicle": presented_vehicle}, ensure_ascii=False)
+        sql = f'''
+            INSERT INTO "{SCHEMA}"."Message"
+              ("id", "conversationId", "providerMessageId", "instanceName",
+               "direction", "contentType", "text", "fromMe", "isHumanSent",
+               "isBotSent", "processingStatus", "createdAt", "processedAt",
+               "turnFactsJson")
+            VALUES (
+              $1, $2, $3, $4,
+              'OUTBOUND'::"{SCHEMA}"."MessageDirection",
+              $7::"{SCHEMA}"."MessageContentType",
+              $5, true, false, true, 'DONE', $6, $6,
+              $8::jsonb
+            )
+            ON CONFLICT ("instanceName", "providerMessageId") DO NOTHING
+            RETURNING "id"
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                sql,
+                msg_id,
+                conversation_id,
+                provider_id,
+                instance_name,
+                text,
+                now,
+                ctype,
+                turn_facts,
+            )
+            return str(row["id"]) if row else msg_id
+
+    async def find_open_bot_reservation(
+        self,
+        *,
+        conversation_id: str,
+        instance_name: str,
+        text: str,
+    ) -> dict[str, str] | None:
+        """Reuse an in-flight reserved bot outbound so retry does not duplicate."""
+        sql = f'''
+            SELECT "id", "providerMessageId"
+            FROM "{SCHEMA}"."Message"
+            WHERE "conversationId" = $1
+              AND "instanceName" = $2
+              AND "isBotSent" = true
+              AND "text" = $3
+              AND "providerMessageId" LIKE $4
+            ORDER BY "createdAt" ASC
+            LIMIT 1
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                sql,
+                conversation_id,
+                instance_name,
+                text,
+                RESERVED_BOT_PROVIDER_LIKE,
+            )
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "providerMessageId": str(row["providerMessageId"]),
+        }
+
+    async def update_bot_provider_id(
+        self,
+        *,
+        message_id: str,
+        instance_name: str,
+        provider_message_id: str | None,
+    ) -> str:
+        """Point a reserved bot row at the Evolution id after send.
+
+        Unique conflict means the echo already inserted that id — mark the
+        echo as bot and delete the pending duplicate. Blank / reserved ids
+        leave the reserved row in place so a later echo can still reconcile.
+        """
+        new_id = (provider_message_id or "").strip()
+        if not new_id or is_reserved_bot_provider_id(new_id):
+            return message_id
+        update_sql = f'''
+            UPDATE "{SCHEMA}"."Message"
+            SET "providerMessageId" = $2
+            WHERE "id" = $1
+              AND "instanceName" = $3
+              AND "isBotSent" = true
+              AND (
+                "providerMessageId" = $2
+                OR "providerMessageId" LIKE $4
+              )
+            RETURNING "id"
+        '''
+        mark_echo_sql = f'''
+            UPDATE "{SCHEMA}"."Message"
+            SET "isBotSent" = true, "isHumanSent" = false
+            WHERE "instanceName" = $1
+              AND "providerMessageId" = $2
+            RETURNING "id"
+        '''
+        delete_pending_sql = f'''
+            DELETE FROM "{SCHEMA}"."Message"
+            WHERE "id" = $1
+              AND "isBotSent" = true
+              AND "providerMessageId" LIKE $2
+        '''
+        async with self._pool.acquire() as conn:
+            try:
+                row = await conn.fetchrow(
+                    update_sql,
+                    message_id,
+                    new_id,
+                    instance_name,
+                    RESERVED_BOT_PROVIDER_LIKE,
+                )
+            except Exception as exc:
+                if not _is_unique_violation(exc):
+                    raise
+                echo = await conn.fetchrow(mark_echo_sql, instance_name, new_id)
+                await conn.execute(delete_pending_sql, message_id, RESERVED_BOT_PROVIDER_LIKE)
+                if echo and echo.get("id"):
+                    return str(echo["id"])
+                return message_id
+            return str(row["id"]) if row and row.get("id") else message_id
+
+    async def has_bot_outbound_provider_id(
+        self,
+        *,
+        instance_name: str,
+        provider_message_id: str | None,
+    ) -> bool:
+        """True when this instance already recorded a bot send with this id.
+
+        Scoped to instanceName so another tenant/conversation cannot satisfy
+        correlation. Missing/blank ids are insufficient provenance.
+        """
+        pid = (provider_message_id or "").strip()
+        if not pid:
+            return False
+        sql = f'''
+            SELECT 1
+            FROM "{SCHEMA}"."Message"
+            WHERE "instanceName" = $1
+              AND "providerMessageId" = $2
+              AND "isBotSent" = true
+            LIMIT 1
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(sql, instance_name, pid)
+        return row is not None
+
+    async def patch_canonical_facts(
+        self, conversation_id: str, facts_patch: dict
+    ) -> None:
+        """Merge new facts into canonicalStateJson.facts without overwriting other state."""
+        import json as _json
+
+        sql = f'''
+            UPDATE "{SCHEMA}"."Conversation"
+            SET "canonicalStateJson" = jsonb_set(
+                COALESCE("canonicalStateJson", '{{}}'::jsonb),
+                '{{facts}}',
+                COALESCE("canonicalStateJson"->'facts', '{{}}'::jsonb) || $2::jsonb,
+                true
+            )
+            WHERE "id" = $1
+        '''
+        async with self._pool.acquire() as conn:
+            await conn.execute(sql, conversation_id, _json.dumps(facts_patch))
+
+    async def find_bot_message_text_by_provider_id(
+        self, provider_message_id: str
+    ) -> str | None:
+        """Return text of a bot-sent message by its Evolution provider message ID."""
+        sql = f'''
+            SELECT "text"
+            FROM "{SCHEMA}"."Message"
+            WHERE "providerMessageId" = $1
+              AND "isBotSent" = true
+            LIMIT 1
+        '''
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(sql, provider_message_id)
+            return str(row["text"]) if row and row["text"] else None

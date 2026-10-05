@@ -1,0 +1,88 @@
+"use client";
+
+import dynamic from "next/dynamic";
+import { motion, useReducedMotion } from "motion/react";
+
+const BarChart = dynamic(() => import("./AdminChart").then((m) => m.BarChart), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[220px] items-center justify-center">
+      <div className="h-8 w-8 animate-spin rounded-full border-2 border-facil-orange border-t-transparent" />
+    </div>
+  ),
+});
+
+const DonutChart = dynamic(() => import("./AdminChart").then((m) => m.DonutChart), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[220px] items-center justify-center">
+      <div className="h-8 w-8 animate-spin rounded-full border-2 border-facil-orange border-t-transparent" />
+    </div>
+  ),
+});
+
+interface ChartData {
+  label: string;
+  value: number;
+}
+
+interface DashboardChartsProps {
+  periodTitle: string;
+  periodData: ChartData[];
+  statusData: ChartData[];
+  sourceData: ChartData[];
+}
+
+export function DashboardCharts({
+  periodTitle,
+  periodData,
+  statusData,
+  sourceData,
+}: DashboardChartsProps) {
+  const reduceMotion = useReducedMotion();
+  const fade = reduceMotion
+    ? undefined
+    : {
+        initial: { opacity: 0, y: 16 },
+        animate: { opacity: 1, y: 0 },
+        transition: { duration: 0.45, ease: [0.22, 1, 0.36, 1] as const },
+      };
+
+  return (
+    <motion.div className="space-y-4" {...fade}>
+      <div className="grid gap-4 lg:grid-cols-5">
+        <div className="admin-card lg:col-span-3">
+          <h2 className="mb-4 text-sm font-semibold text-foreground">{periodTitle}</h2>
+          {periodData.some((d) => d.value > 0) ? (
+            <BarChart data={periodData} />
+          ) : (
+            <div className="flex h-[220px] items-center justify-center text-sm text-facil-muted">
+              Sem dados no período
+            </div>
+          )}
+        </div>
+        <div className="admin-card lg:col-span-2">
+          <h2 className="mb-4 text-sm font-semibold text-foreground">Leads por status</h2>
+          {statusData.length > 0 ? (
+            <DonutChart data={statusData} />
+          ) : (
+            <div className="flex h-[220px] items-center justify-center text-sm text-facil-muted">
+              Sem dados
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="admin-card">
+        <h2 className="mb-4 text-sm font-semibold text-foreground">Origem dos leads</h2>
+        {sourceData.length > 0 ? (
+          <BarChart data={sourceData} height={180} horizontal />
+        ) : (
+          <div className="flex h-[180px] items-center justify-center text-sm text-facil-muted">
+            Sem dados
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+}
