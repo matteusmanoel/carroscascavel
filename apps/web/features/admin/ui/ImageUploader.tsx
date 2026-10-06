@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { Upload, X, ImageIcon, GripVertical, Link as LinkIcon, Camera } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { prepareVehicleUpload } from "@/features/admin/lib/prepare-vehicle-upload";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -79,8 +80,9 @@ export function ImageUploader({ value, onChange }: ImageUploaderProps) {
     ]);
 
     try {
+      const upload = await prepareVehicleUpload(file);
       const res = await fetch(
-        `/api/admin/upload?filename=${encodeURIComponent(file.name)}&type=${encodeURIComponent(file.type)}`,
+        `/api/admin/upload?filename=${encodeURIComponent(upload.name)}&type=${encodeURIComponent(upload.type)}`,
       );
 
       if (!res.ok) {
@@ -101,8 +103,8 @@ export function ImageUploader({ value, onChange }: ImageUploaderProps) {
 
       await fetch(uploadUrl, {
         method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type },
+        body: upload,
+        headers: { "Content-Type": upload.type },
       });
 
       URL.revokeObjectURL(localUrl);
