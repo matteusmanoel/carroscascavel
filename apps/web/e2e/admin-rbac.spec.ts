@@ -33,7 +33,7 @@ test.describe("RBAC — perfil admin (SUPER_ADMIN)", () => {
 
   test("acessa cadastro de veículo", async ({ page }) => {
     await page.goto("/admin/veiculos/novo");
-    await expect(page.getByRole("heading", { name: "Novo veículo" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Próximo" })).toBeVisible();
   });
 });
 
