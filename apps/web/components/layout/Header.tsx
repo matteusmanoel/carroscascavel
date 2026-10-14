@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { BrandLogo } from "@/components/shared/BrandLogo";
 
 type HeaderProps = {
   siteName?: string;
@@ -46,15 +47,8 @@ export function Header({ siteName = "Carros Cascavel", whatsappNumber }: HeaderP
         }`}
       >
         <div className="mx-auto hidden h-14 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 xl:flex">
-          <Link href="/" className="flex shrink-0 items-center gap-2" onClick={() => setMenuOpen(false)}>
-            <img
-              src="/logo-simbolo.svg"
-              alt={siteName}
-              width={34}
-              height={34}
-              className="rounded-md border border-facil-orange/40 object-cover"
-            />
-            <span className="font-bold text-base tracking-tight text-white">{siteName}</span>
+          <Link href="/" className="flex shrink-0 items-center" onClick={() => setMenuOpen(false)}>
+            <BrandLogo alt={siteName} className="h-9 w-auto" />
           </Link>
 
           <nav className="flex items-center gap-0 text-xs font-medium text-white">
@@ -90,13 +84,7 @@ export function Header({ siteName = "Carros Cascavel", whatsappNumber }: HeaderP
             className="justify-self-start"
             onClick={() => setMenuOpen(false)}
           >
-            <img
-              src="/logo-simbolo.svg"
-              alt={siteName}
-              width={34}
-              height={34}
-              className="rounded-md border border-facil-orange/40 object-cover"
-            />
+            <BrandLogo alt={siteName} className="h-8 w-auto" />
           </Link>
 
           <div className="justify-self-center" />

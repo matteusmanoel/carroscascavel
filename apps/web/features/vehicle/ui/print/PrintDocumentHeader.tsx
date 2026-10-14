@@ -1,3 +1,4 @@
+import { BrandLogo } from "@/components/shared/BrandLogo";
 import { BRAND } from "@/lib/brand";
 import { formatPrintAddress, formatPrintTimestamp, type PrintSiteContext } from "@/features/vehicle/lib/print-document";
 
@@ -15,12 +16,7 @@ export function PrintDocumentHeader({ site, title, subtitle, printedAt }: Props)
   return (
     <header className="flex items-start justify-between gap-4 border-b border-zinc-300 pb-3">
       <div className="flex min-w-0 items-center gap-3">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/logo-simbolo.svg"
-          alt=""
-          className="h-10 w-10 rounded-md object-cover"
-        />
+        <BrandLogo alt="" className="h-10 w-auto bg-zinc-950 px-1.5 py-1 print:bg-zinc-950" />
         <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-wide text-[#E2232E]">
             {site.siteName || BRAND.name}

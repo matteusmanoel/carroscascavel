@@ -22,6 +22,7 @@ import {
   Menu,
   X,
 } from "lucide-react";
+import { BrandLogo } from "@/components/shared/BrandLogo";
 import { cn } from "@/lib/cn";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
 import { ThemeToggle } from "@/components/admin/ThemeToggle";
@@ -166,9 +167,8 @@ export function AdminShell({ children, signOutAction, role }: AdminShellProps) {
           )}
         >
           {!isCollapsed && (
-            <Link href="/admin" className="flex items-center gap-2">
-              <img src="/logo-simbolo.svg" alt="" className="h-7 w-7 rounded-md" />
-              <span className="text-sm font-semibold text-zinc-950 dark:text-white">Carros Cascavel</span>
+            <Link href="/admin" className="flex min-w-0 items-center">
+              <BrandLogo className="h-8 w-auto rounded bg-zinc-950 px-1.5 py-0.5" />
             </Link>
           )}
           <button
@@ -253,9 +253,8 @@ export function AdminShell({ children, signOutAction, role }: AdminShellProps) {
               }
             >
               <div className="flex h-14 items-center justify-between border-b border-zinc-100 px-4 dark:border-zinc-800">
-                <Link href="/admin" className="flex items-center gap-2" onClick={closeMobile}>
-                  <img src="/logo-simbolo.svg" alt="" className="h-7 w-7 rounded-md" />
-                  <span className="font-semibold text-zinc-950 dark:text-white">Carros Cascavel Admin</span>
+                <Link href="/admin" className="flex min-w-0 items-center" onClick={closeMobile}>
+                  <BrandLogo className="h-8 w-auto rounded bg-zinc-950 px-1.5 py-0.5" />
                 </Link>
                 <button
                   onClick={closeMobile}
@@ -302,10 +301,7 @@ export function AdminShell({ children, signOutAction, role }: AdminShellProps) {
             <Menu className="h-5 w-5" />
           </button>
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <img src="/logo-simbolo.svg" alt="" className="h-6 w-6 shrink-0 rounded" />
-            <span className="truncate text-sm font-semibold text-zinc-950 dark:text-white">
-              Carros Cascavel Admin
-            </span>
+            <BrandLogo className="h-7 w-auto shrink-0 rounded bg-zinc-950 px-1.5 py-0.5" />
           </div>
           {showSdrBadge ? <SdrNotificationBadge placement="header" /> : null}
           <ThemeToggle />

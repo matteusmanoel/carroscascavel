@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import { BrandLogo } from "@/components/shared/BrandLogo";
 import {
   FacebookIcon,
   InstagramIcon,
@@ -48,16 +49,7 @@ export function Footer({
       <div className="relative mx-auto max-w-6xl px-4 pb-[calc(6.25rem+var(--cookie-banner-offset,0px))] pt-10 sm:pt-12 lg:pb-10">
         <div className="grid items-end gap-8 lg:grid-cols-[minmax(0,1fr)_auto_minmax(16rem,22rem)] lg:gap-10">
           <div>
-            <div className="flex items-center gap-3">
-              <img
-                src="/logo-simbolo.svg"
-                alt={siteName}
-                width={40}
-                height={40}
-                className="rounded-md border border-facil-orange/50 object-cover"
-              />
-              <p className="font-bold text-white">{siteName}</p>
-            </div>
+            <BrandLogo alt={siteName} className="h-12 w-auto" />
             <p className="mt-3 max-w-md text-sm leading-relaxed text-zinc-400">
               {footerText ?? "Seminovos multimarcas com financiamento e avaliação do seu usado."}
             </p>
