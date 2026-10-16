@@ -16,8 +16,8 @@ export const HERO_PROTOTYPE_VARIANTS = [
   },
   {
     key: "d",
-    name: "Atual",
-    note: "Hero em produção, para comparar.",
+    name: "Anterior",
+    note: "Hero antiga, para comparar.",
   },
   {
     key: "e",

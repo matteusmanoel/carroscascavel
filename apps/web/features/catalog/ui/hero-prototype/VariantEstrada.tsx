@@ -41,6 +41,18 @@ const doors = [
 type DoorId = (typeof doors)[number]["id"];
 type Point = { x: number; y: number };
 
+function IntroChars({ text, className }: { text: string; className?: string }) {
+  return (
+    <span className={className}>
+      {Array.from(text).map((char, index) => (
+        <span key={`${char}-${index}`} data-intro-char className="inline-block opacity-0">
+          {char === " " ? "\u00A0" : char}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 const ticker = [
   "500+ negociações",
   "12+ financeiras",
@@ -48,13 +60,18 @@ const ticker = [
   "Cascavel / PR",
 ];
 
+type Props = {
+  /** Leaves room for the dev-only variant switcher along the bottom. */
+  reserveSwitcher?: boolean;
+};
+
 /**
- * PROTOTYPE — throwaway.
- * F — Estrada aberta. Coded opening: the car runs to the horizon and the sun
- * bursts into the hero. Each door then floods the whole stage with its scene,
- * starting from the exact point where the cursor entered.
+ * Home hero — Estrada aberta.
+ * Coded opening: the car runs to the horizon and the sun bursts into the hero.
+ * On a fine pointer, each door floods the stage from the cursor. On a phone,
+ * each door carries its own scene, because there is no hover.
  */
-export function VariantEstrada() {
+export function VariantEstrada({ reserveSwitcher = false }: Props) {
   const rootRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const introRef = useRef<gsap.core.Timeline | null>(null);
@@ -83,39 +100,48 @@ export function VariantEstrada() {
         setMode("static");
       };
 
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const farthest = Math.hypot(width / 2, Math.max(height * 0.38, height * 0.62));
+      const ballScale = (farthest / 32) * 1.2;
       const tl = gsap.timeline({ defaults: { ease: "power2.out" }, onComplete: finish });
       introRef.current = tl;
       tl.set("[data-intro-flash]", { xPercent: -50, yPercent: -50, scale: 0 })
-        .set("[data-intro-road]", { transformOrigin: HORIZON, scale: 1.04, filter: "blur(0px)" })
-        .fromTo("[data-intro-road]", { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.6 })
-        .to(
-          "[data-intro-road]",
-          { scale: 3.4, filter: "blur(5px) brightness(1.15)", duration: 2.3, ease: "power3.in" },
-          0.35,
+        .set("[data-intro-road]", { autoAlpha: 1, transformOrigin: HORIZON, scale: 1.02 })
+        .fromTo(
+          "[data-intro-char]",
+          { autoAlpha: 0, y: 14 },
+          { autoAlpha: 1, y: 0, duration: 0.48, stagger: 0.085, ease: "power2.out" },
+          0.1,
         )
+        .to({}, { duration: 1 }, ">")
+        .addLabel("drive")
+        .to("[data-intro-road]", { scale: 1.5, duration: 2.9, ease: "power2.in" }, "drive")
         .fromTo(
           "[data-intro-streaks]",
-          { autoAlpha: 0, scale: 0.5 },
-          { autoAlpha: 0.85, scale: 2.4, duration: 2.3, ease: "power3.in" },
-          0.35,
+          { autoAlpha: 0, scale: 0.2 },
+          { autoAlpha: 1, scale: 3.4, duration: 0.32, ease: "power4.in" },
+          "drive+=2.2",
         )
-        .fromTo(
-          "[data-intro-word]",
-          { autoAlpha: 0, y: 24, letterSpacing: "0.5em" },
-          { autoAlpha: 1, y: 0, letterSpacing: "0.18em", duration: 0.7, stagger: 0.18 },
-          0.7,
-        )
-        .to("[data-intro-word]", { autoAlpha: 0, scale: 1.6, duration: 0.45, ease: "power2.in" }, 2.05)
+        .addLabel("burst", "drive+=2.48")
         .fromTo(
           "[data-intro-flash]",
           { scale: 0, autoAlpha: 1 },
-          { scale: 60, duration: 0.55, ease: "power4.in" },
-          2.3,
+          { scale: ballScale, duration: 0.16, ease: "power4.in" },
+          "burst",
         )
-        .to("[data-intro]", { autoAlpha: 0, duration: 0.7 }, 2.9)
-        .from("[data-hero-line]", { y: 60, autoAlpha: 0, duration: 0.9, stagger: 0.12, ease: "power4.out" }, 2.95)
-        .from("[data-hero-swoosh]", { strokeDashoffset: 420, duration: 0.9, ease: "power2.inOut" }, 3.4)
-        .from("[data-hero-door]", { y: 80, autoAlpha: 0, duration: 0.8, stagger: 0.1, ease: "power4.out" }, 3.15);
+        .addLabel("covered", "burst+=0.16")
+        .set(
+          "[data-intro-road], [data-intro-streaks], [data-intro-shade], [data-intro-phrase], [data-intro-skip]",
+          { autoAlpha: 0 },
+          "covered",
+        )
+        .to({}, { duration: 0.1 }, "covered")
+        .to("[data-intro-flash]", { autoAlpha: 0, duration: 0.18, ease: "power2.in" }, "covered+=0.1")
+        .addLabel("reveal", "covered+=0.3")
+        .from("[data-hero-line]", { y: 60, autoAlpha: 0, duration: 0.8, stagger: 0.1, ease: "power4.out" }, "reveal")
+        .from("[data-hero-swoosh]", { strokeDashoffset: 420, duration: 0.75, ease: "power2.inOut" }, "reveal+=0.18")
+        .from("[data-hero-door]", { y: 80, autoAlpha: 0, duration: 0.7, stagger: 0.08, ease: "power4.out" }, "reveal+=0.06");
 
       const skip = (event: KeyboardEvent) => {
         if (event.key === "Escape" || event.key === "Enter" || event.key === " ") tl.progress(1);
@@ -131,13 +157,19 @@ export function VariantEstrada() {
     setActive(id);
   }
 
+  function canFlood() {
+    return window.matchMedia("(min-width: 768px)").matches;
+  }
+
   function onDoorEnter(id: DoorId, event: MouseEvent<HTMLAnchorElement>) {
+    if (!canFlood()) return;
     const stage = stageRef.current?.getBoundingClientRect();
     if (!stage) return;
     openFromPoint(id, { x: event.clientX - stage.left, y: event.clientY - stage.top });
   }
 
   function onDoorFocus(id: DoorId, event: FocusEvent<HTMLAnchorElement>) {
+    if (!canFlood()) return;
     const stage = stageRef.current?.getBoundingClientRect();
     const door = event.currentTarget.getBoundingClientRect();
     if (!stage) return;
@@ -157,17 +189,24 @@ export function VariantEstrada() {
   return (
     <section ref={rootRef} className="relative bg-black text-white">
       {mode === "intro" ? (
+        <img
+          src="/hero-familia-sonho.jpg"
+          alt=""
+          className="pointer-events-none fixed inset-0 z-[55] h-full w-full object-cover"
+        />
+      ) : null}
+      {mode === "intro" ? (
         <div
           data-intro
           role="presentation"
           onClick={() => introRef.current?.progress(1)}
-          className="fixed inset-0 z-[60] cursor-pointer overflow-hidden bg-black"
+          className="fixed inset-0 z-[60] cursor-pointer overflow-hidden bg-transparent"
         >
           <img
             data-intro-road
             src="/hero-intro-estrada.jpg"
             alt=""
-            className="absolute inset-0 h-full w-full object-cover opacity-0"
+            className="absolute inset-0 h-full w-full object-cover"
             style={{ objectPosition: "center 40%" }}
           />
           <div
@@ -181,27 +220,33 @@ export function VariantEstrada() {
               WebkitMaskImage: "radial-gradient(circle at 50% 38%, transparent 0 9%, black 40%)",
             }}
           />
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,transparent_0,rgba(0,0,0,0.3)_75%)]" />
-          <p className="pointer-events-none absolute inset-x-0 top-[14%] text-center font-display text-4xl uppercase text-white [text-shadow:0_4px_30px_rgba(0,0,0,0.6)] sm:text-6xl">
-            <span data-intro-word className="inline-block opacity-0">
-              Mais que
-            </span>{" "}
-            <span data-intro-word className="inline-block text-[#E2232E] opacity-0">
-              carros.
-            </span>
+          <div
+            data-intro-shade
+            className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,transparent_0,rgba(0,0,0,0.22)_78%)]"
+          />
+          <p
+            data-intro-phrase
+            className="pointer-events-none absolute inset-x-0 top-[18%] px-4 text-center font-display text-[clamp(1.85rem,8vw,4.25rem)] uppercase text-white [text-shadow:0_4px_30px_rgba(0,0,0,0.65)]"
+          >
+            <IntroChars text="Mais que" />
+            <IntroChars text=" " />
+            <IntroChars text="carros." className="text-[#E2232E]" />
           </p>
+          <span
+            data-intro-skip
+            className="pointer-events-none absolute bottom-6 right-6 z-10 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/60"
+          >
+            Toque ou Esc para pular
+          </span>
           <div
             data-intro-flash
-            className="pointer-events-none absolute h-16 w-16 scale-0 rounded-full"
+            className="pointer-events-none absolute z-20 h-16 w-16 rounded-full opacity-0"
             style={{
               left: "50%",
               top: "38%",
-              background: "radial-gradient(circle, #fff7e8 0%, #ffd2a1 35%, #E2232E 70%, #1C2220 100%)",
+              background: "radial-gradient(circle, #fff7e8 0%, #ffb9a4 24%, #E2232E 58%, #E2232E 100%)",
             }}
           />
-          <span className="pointer-events-none absolute bottom-6 right-6 text-[11px] font-semibold uppercase tracking-[0.28em] text-white/60">
-            Clique ou Esc para pular
-          </span>
         </div>
       ) : null}
 
@@ -217,8 +262,17 @@ export function VariantEstrada() {
             </span>
           ))}
         </div>
-        <div className="pointer-events-none absolute inset-y-0 left-0 w-24 bg-gradient-to-r from-[#1C2220] to-transparent" />
-        <div className="pointer-events-none absolute inset-y-0 right-0 w-24 bg-gradient-to-l from-[#1C2220] to-transparent" />
+        <div className="pointer-events-none absolute inset-y-0 left-0 w-16 bg-gradient-to-r from-[#1C2220] to-transparent sm:w-24" />
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-28 bg-gradient-to-l from-[#1C2220] to-transparent sm:w-36" />
+        {mode === "static" ? (
+          <button
+            type="button"
+            onClick={replayIntro}
+            className="absolute right-2 top-1/2 z-10 -translate-y-1/2 rounded-full border border-white/25 bg-[#1C2220] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/80 hover:text-white sm:right-3 sm:px-3 sm:text-[11px] sm:tracking-[0.2em]"
+          >
+            ↺ Abertura
+          </button>
+        ) : null}
       </div>
 
       <div
@@ -243,7 +297,7 @@ export function VariantEstrada() {
               key={door.id}
               src={door.scene}
               alt=""
-              className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+              className="pointer-events-none absolute inset-0 hidden h-full w-full object-cover md:block"
               style={{
                 clipPath: `circle(${open ? "150%" : "0%"} at ${x}px ${y}px)`,
                 transform: open ? "scale(1)" : "scale(1.12)",
@@ -256,17 +310,17 @@ export function VariantEstrada() {
 
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.75)_0%,rgba(0,0,0,0.15)_34%,rgba(0,0,0,0.1)_52%,rgba(0,0,0,0.85)_100%)]" />
 
-        <div className="relative z-10 px-5 pt-8 sm:px-10 sm:pt-12 lg:px-14">
+        <div className="relative z-10 px-5 pt-5 sm:px-10 sm:pt-12 lg:px-14">
           <h1 className="max-w-5xl">
             <span
               data-hero-line
-              className="block font-hero text-2xl font-semibold text-white/90 sm:text-4xl lg:text-5xl"
+              className="block font-hero text-lg font-semibold text-white/90 sm:text-4xl lg:text-5xl"
             >
               Mais que <strong className="font-extrabold text-[#E2232E]">carros</strong>.
             </span>
             <span
               data-hero-line
-              className="mt-2 block font-display text-[clamp(2.6rem,7vw,6.5rem)] uppercase leading-[0.9] [text-shadow:0_6px_40px_rgba(0,0,0,0.5)]"
+              className="mt-1 block font-display text-[clamp(1.85rem,8.6vw,6.5rem)] uppercase leading-[0.92] [text-shadow:0_6px_40px_rgba(0,0,0,0.5)] sm:mt-2"
             >
               Sua próxima{" "}
               <span className="relative inline-block text-[#E2232E]">
@@ -275,7 +329,7 @@ export function VariantEstrada() {
                   aria-hidden
                   viewBox="0 0 400 24"
                   preserveAspectRatio="none"
-                  className="absolute -bottom-3 left-0 h-4 w-full sm:-bottom-4 sm:h-5"
+                  className="absolute -bottom-1 left-0 h-3 w-full sm:-bottom-4 sm:h-5"
                 >
                   <path
                     data-hero-swoosh
@@ -295,7 +349,11 @@ export function VariantEstrada() {
           </h1>
         </div>
 
-        <div className="relative z-10 mt-8 flex flex-col border-t border-white/15 pb-20 md:mt-auto md:h-[44%] md:pb-0 md:min-h-[17rem] md:flex-row">
+        <div
+          className={`relative z-10 mt-auto flex flex-col border-t border-white/15 md:h-[44%] md:min-h-[17rem] md:flex-row ${
+            reserveSwitcher ? "bg-[#1C2220] pb-28 md:bg-transparent md:pb-0" : ""
+          }`}
+        >
           {doors.map((door) => {
             const open = active === door.id;
             const dimmed = active !== null && !open;
@@ -309,31 +367,37 @@ export function VariantEstrada() {
                 onMouseLeave={() => setActive(null)}
                 onFocus={(event) => onDoorFocus(door.id, event)}
                 onBlur={() => setActive(null)}
-                className={`group relative flex min-h-[22vh] flex-col justify-end border-b border-white/15 px-6 pb-8 pt-8 transition-[flex-grow,opacity] duration-700 ease-[cubic-bezier(.7,0,.2,1)] sm:px-8 md:min-h-0 md:border-b-0 md:border-l md:pb-20 md:first:border-l-0 ${
+                className={`group relative flex flex-col justify-end overflow-hidden border-b border-white/15 px-5 py-3.5 transition-[flex-grow,opacity] duration-700 ease-[cubic-bezier(.7,0,.2,1)] sm:px-8 md:min-h-0 md:border-b-0 md:border-l md:px-8 md:pb-20 md:pt-8 md:first:border-l-0 ${
                   open ? "md:grow-[1.7]" : "md:grow"
-                } ${dimmed ? "opacity-55" : "opacity-100"} md:basis-0`}
+                } ${dimmed ? "md:opacity-55" : "opacity-100"} md:basis-0`}
               >
+                <img
+                  src={door.scene}
+                  alt=""
+                  className="pointer-events-none absolute inset-0 h-full w-full object-cover md:hidden"
+                />
+                <span className="pointer-events-none absolute inset-0 bg-gradient-to-r from-black/75 via-black/45 to-black/25 md:hidden" />
                 <span
                   className={`absolute inset-x-0 top-0 h-1 origin-left bg-[#E2232E] transition-transform duration-700 ${
                     open ? "scale-x-100" : "scale-x-0"
                   }`}
                 />
-                <span className="font-hero text-xs font-bold uppercase tracking-[0.3em] text-white/70">
+                <span className="relative font-hero text-[10px] font-bold uppercase tracking-[0.28em] text-white/70 sm:text-xs">
                   {door.index} · Quero
                 </span>
-                <h2 className="font-display mt-2 text-5xl uppercase leading-none sm:text-6xl lg:text-7xl xl:text-8xl">
+                <h2 className="font-display relative mt-1 text-[2rem] uppercase leading-none sm:text-5xl md:mt-2 md:text-6xl lg:text-7xl xl:text-8xl">
                   {door.title}
                 </h2>
                 <p
-                  className={`max-w-sm overflow-hidden text-sm leading-relaxed text-white/85 transition-all duration-500 md:max-h-0 md:opacity-0 ${
-                    open ? "mt-3 md:max-h-24 md:opacity-100" : "mt-3 md:mt-0"
+                  className={`hidden max-w-sm overflow-hidden text-sm leading-relaxed text-white/85 transition-all duration-500 md:block md:max-h-0 md:opacity-0 ${
+                    open ? "md:mt-3 md:max-h-24 md:opacity-100" : "md:mt-0"
                   }`}
                 >
                   {door.line}
                 </p>
-                <span className="mt-5 inline-flex items-center gap-3 text-sm font-bold uppercase tracking-widest">
+                <span className="relative mt-2 inline-flex items-center gap-3 text-xs font-bold uppercase tracking-widest sm:text-sm md:mt-5">
                   <span
-                    className={`flex h-10 w-10 items-center justify-center rounded-full border transition duration-500 ${
+                    className={`flex h-8 w-8 items-center justify-center rounded-full border transition duration-500 md:h-10 md:w-10 ${
                       open ? "border-[#E2232E] bg-[#E2232E]" : "border-white/40"
                     }`}
                   >
@@ -345,16 +409,6 @@ export function VariantEstrada() {
             );
           })}
         </div>
-
-        {mode === "static" ? (
-          <button
-            type="button"
-            onClick={replayIntro}
-            className="absolute right-4 top-4 z-20 rounded-full border border-white/25 bg-black/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-white/75 backdrop-blur hover:text-white"
-          >
-            ↺ Abertura
-          </button>
-        ) : null}
       </div>
     </section>
   );

@@ -6,7 +6,7 @@ import { getFeaturedVehicles } from "@/features/vehicle/server/queries";
 import { listPublishedBlogPosts } from "@/features/content/server/queries";
 import { FeaturedVehiclesCarousel } from "@/features/catalog/ui/FeaturedVehiclesCarousel";
 import { toPublicVehicleCard } from "@/features/catalog/lib/public-catalog";
-import { HeroPrototype } from "@/features/catalog/ui/hero-prototype/HeroPrototype";
+import { VariantEstrada } from "@/features/catalog/ui/hero-prototype/VariantEstrada";
 import { HomePageSkeleton } from "@/features/catalog/ui/HomePageSkeleton";
 import { catalogFullBleedClass } from "@/features/catalog/lib/shell";
 import { BlogCard } from "@/features/content/ui/BlogCard";
@@ -15,21 +15,15 @@ import { STORE_MAPS_PLACE_URL, storeMapEmbedSrc } from "@/lib/store-maps";
 import { prisma } from "@/lib/db";
 
 
-export default async function HomePage({
-  searchParams,
-}: {
-  searchParams: Promise<{ variant?: string }>;
-}) {
-  const { variant } = await searchParams;
-
+export default function HomePage() {
   return (
     <Suspense fallback={<HomePageSkeleton />}>
-      <HomePageContent heroVariant={variant} />
+      <HomePageContent />
     </Suspense>
   );
 }
 
-async function HomePageContent({ heroVariant }: { heroVariant?: string }) {
+async function HomePageContent() {
   const [settings, featured, posts, testimonials] = await Promise.all([
     getSiteSettings(),
     getFeaturedVehicles(9),
@@ -42,9 +36,6 @@ async function HomePageContent({ heroVariant }: { heroVariant?: string }) {
 
   const wa = settings?.defaultWhatsappNumber?.replace(/\D/g, "") ?? "";
   const whatsappHref = wa
-    ? `https://wa.me/${wa}?text=${encodeURIComponent("Olá! Vim pelo site da Carros Cascavel.")}`
-    : "#";
-  const heroWhatsappHref = wa
     ? `https://wa.me/${wa}?text=${encodeURIComponent("Olá! Vim pelo site da Carros Cascavel.")}`
     : "#";
   const mapsHref = settings?.googleMapsUrl?.trim() || STORE_MAPS_PLACE_URL;
@@ -60,7 +51,7 @@ async function HomePageContent({ heroVariant }: { heroVariant?: string }) {
 
   return (
     <main>
-      <HeroPrototype variant={heroVariant} whatsappHref={heroWhatsappHref} />
+      <VariantEstrada />
 
       {featured.length > 0 && (
         <section data-whatsapp-reveal className="py-16 sm:py-20">

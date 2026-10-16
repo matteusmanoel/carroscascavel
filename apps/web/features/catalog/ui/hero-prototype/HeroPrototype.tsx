@@ -14,12 +14,13 @@ type Props = {
 
 /**
  * PROTOTYPE — throwaway.
- * Six hero variants on `/`, switchable via `?variant=`.
- * A Lâmina, B Três portas, C Letreiro, D Atual, E Portas + faixa, F Estrada aberta.
+ * Six hero variants on `/`, switchable via `?variant=` outside production.
+ * Production always renders F — Estrada aberta.
+ * A Lâmina, B Três portas, C Letreiro, D Anterior, E Portas + faixa, F Estrada aberta.
  */
 export function HeroPrototype({ variant, whatsappHref }: Props) {
   const isProduction = process.env.NODE_ENV === "production";
-  const key = isProduction ? "d" : resolveHeroPrototypeKey(variant);
+  const key = isProduction ? "f" : resolveHeroPrototypeKey(variant);
 
   return (
     <>
@@ -28,7 +29,7 @@ export function HeroPrototype({ variant, whatsappHref }: Props) {
       {key === "c" ? <VariantLetreiro whatsappHref={whatsappHref} /> : null}
       {key === "d" ? <HomeHero whatsappHref={whatsappHref} /> : null}
       {key === "e" ? <VariantPortasFaixa /> : null}
-      {key === "f" ? <VariantEstrada /> : null}
+      {key === "f" ? <VariantEstrada reserveSwitcher={!isProduction} /> : null}
       {isProduction ? null : (
         <PrototypeSwitcher variants={HERO_PROTOTYPE_VARIANTS} current={key} />
       )}
