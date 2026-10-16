@@ -26,7 +26,7 @@ const pool = new Pool({
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
-const adminEmail = process.env.SEED_ADMIN_EMAIL ?? "miltonvendas@hotmail.com";
+const adminEmail = process.env.SEED_ADMIN_EMAIL ?? "miltonvendas@carroscascavel.com";
 const adminPassword = process.env.SEED_ADMIN_PASSWORD;
 const adminName = process.env.SEED_ADMIN_NAME ?? "Admin";
 
@@ -41,7 +41,7 @@ async function main() {
   const settingsData = {
     siteName: "Carros Cascavel",
     defaultWhatsappNumber: "5545999974232",
-    defaultEmail: "miltonvendas@hotmail.com",
+    defaultEmail: "miltonvendas@carroscascavel.com",
     phoneNumber: "5545999974232",
     addressLine: "R. Ipanema, 1206 - Periolo",
     city: "Cascavel",
@@ -130,7 +130,7 @@ Venha nos visitar em Cascavel/PR ou fale pelo WhatsApp.`,
       excerpt: "Como tratamos seus dados.",
       body: `Coletamos dados de contato e interesse em veículos apenas para atendimento comercial. Não vendemos seus dados a terceiros.
 
-Para solicitações relacionadas a privacidade, contate miltonvendas@hotmail.com.`,
+Para solicitações relacionadas a privacidade, contate miltonvendas@carroscascavel.com.`,
       metaTitle: "Política de privacidade | Carros Cascavel",
       metaDescription: "Como a Carros Cascavel trata dados pessoais de leads e clientes.",
     },
@@ -142,7 +142,7 @@ Para solicitações relacionadas a privacidade, contate miltonvendas@hotmail.com
 
 Anúncios publicados são a fonte de verdade do estoque. Simulações no site não substituem a análise da financeira.
 
-Para dúvidas, use o WhatsApp ou o e-mail miltonvendas@hotmail.com.`,
+Para dúvidas, use o WhatsApp ou o e-mail miltonvendas@carroscascavel.com.`,
       metaTitle: "Termos de uso | Carros Cascavel",
       metaDescription: "Termos de uso do site da Carros Cascavel em Cascavel/PR.",
     },
@@ -152,7 +152,7 @@ Para dúvidas, use o WhatsApp ou o e-mail miltonvendas@hotmail.com.`,
       excerpt: "Faça parte do time Carros Cascavel.",
       body: `Buscamos pessoas alinhadas com atendimento ao cliente e integridade comercial.
 
-Envie seu currículo para miltonvendas@hotmail.com com o assunto VAGAS — informe a área de interesse (vendas, administrativo, pós-venda).`,
+Envie seu currículo para miltonvendas@carroscascavel.com com o assunto VAGAS — informe a área de interesse (vendas, administrativo, pós-venda).`,
       metaTitle: "Trabalhe conosco | Carros Cascavel",
       metaDescription: "Oportunidades de carreira na Carros Cascavel em Cascavel/PR.",
     },

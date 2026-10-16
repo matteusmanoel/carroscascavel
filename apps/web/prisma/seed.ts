@@ -490,7 +490,7 @@ async function main() {
   const settingsData = {
     siteName: "Carros Cascavel",
     defaultWhatsappNumber: "5545999974232",
-    defaultEmail: "miltonvendas@hotmail.com",
+    defaultEmail: "miltonvendas@carroscascavel.com",
     phoneNumber: "(45) 99997-4232",
     addressLine: "R. Ipanema, 1206 - Periolo",
     city: "Cascavel",
@@ -663,7 +663,7 @@ Financiamento e troca podem ser combinados na mesma visita — agilizando sua de
       excerpt: "Faça parte do time Carros Cascavel.",
       body: `Buscamos pessoas alinhadas com atendimento ao cliente e integridade comercial.
 
-Envie seu currículo para o e-mail miltonvendas@hotmail.com com o assunto VAGAS — informe a área de interesse (vendas, administrativo, pós-venda).`,
+Envie seu currículo para o e-mail miltonvendas@carroscascavel.com com o assunto VAGAS — informe a área de interesse (vendas, administrativo, pós-venda).`,
       metaTitle: "Trabalhe conosco | Carros Cascavel",
       metaDescription: "Oportunidades de carreira na Carros Cascavel.",
     },

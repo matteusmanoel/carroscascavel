@@ -10,6 +10,7 @@
     "lint": "npm run lint --prefix apps/web",
     "typecheck": "npm run typecheck --prefix apps/web",
     "test:e2e": "npm run test:e2e --prefix apps/web",
+    "docker:up": "node scripts/colima-up.mjs",
     "db:up": "docker-compose up -d db",
     "db:down": "docker-compose down",
     "db:logs": "docker-compose logs -f db",

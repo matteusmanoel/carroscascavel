@@ -6,7 +6,7 @@ export const getSiteSettings = unstable_cache(
     const settings = await prisma.siteSettings.findFirst();
     return settings ?? null;
   },
-  ["site-settings"],
+  ["site-settings-v2"],
   {
     tags: ["site-settings"],
     revalidate: false,
