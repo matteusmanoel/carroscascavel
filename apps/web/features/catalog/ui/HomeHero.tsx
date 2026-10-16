@@ -78,7 +78,7 @@ export function HomeHero({ whatsappHref }: Props) {
             data-hero-copy
             className="font-hero absolute inset-x-0 top-3 z-10 px-5 text-center text-[0.95rem] font-bold leading-snug tracking-tight text-[#E2232E] [text-shadow:0_1px_3px_rgba(0,0,0,0.95),0_10px_28px_rgba(0,0,0,0.75)] md:static md:inset-auto md:top-auto md:max-w-xl md:px-0 md:pl-8 md:text-left md:text-2xl md:font-semibold lg:max-w-2xl lg:pl-10 lg:text-[1.75rem]"
           >
-            Aqui, cada chave entregue tem uma história...
+            Mais do que carros.
           </p>
           <div className="font-hero relative w-full px-3 sm:max-w-lg sm:px-6 md:max-w-xl md:pl-8 lg:max-w-2xl lg:pl-10">
             <div className="pointer-events-none absolute inset-x-0 -bottom-8 -top-16 bg-gradient-to-t from-black/75 via-black/35 to-transparent md:hidden" />
@@ -86,8 +86,8 @@ export function HomeHero({ whatsappHref }: Props) {
               data-hero-copy
               className="relative mt-1.5 text-[1.7rem] font-extrabold leading-[1.06] tracking-tight text-white [text-shadow:0_2px_4px_rgba(0,0,0,0.85),0_10px_28px_rgba(0,0,0,0.55)] sm:mt-4 sm:text-5xl md:text-6xl lg:text-[4.35rem]"
             >
-              A próxima pode <br /> ser a{" "}
-              <span className="text-[#E2232E] [text-shadow:0_2px_4px_rgba(0,0,0,0.85),0_8px_20px_rgba(0,0,0,0.5)]">sua</span>
+              A sua próxima história <br /> começa{" "}
+              <span className="text-[#E2232E] [text-shadow:0_2px_4px_rgba(0,0,0,0.85),0_8px_20px_rgba(0,0,0,0.5)]">aqui.</span>
             </h1>
             {whatsappHref !== "#" ? (
               <a
@@ -99,7 +99,7 @@ export function HomeHero({ whatsappHref }: Props) {
               >
                 <span className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/25 to-transparent" />
                 <WhatsAppIcon className="relative h-6 w-6 shrink-0 sm:h-6 sm:w-6" />
-                <span className="relative min-w-0">Quero começar minha história</span>
+                <span className="relative min-w-0">Fale com a gente!</span>
                 <svg
                   className="hero-cta-chevron relative h-5 w-5 shrink-0"
                   viewBox="0 0 24 24"

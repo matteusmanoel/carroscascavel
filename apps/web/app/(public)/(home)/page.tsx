@@ -6,7 +6,7 @@ import { getFeaturedVehicles } from "@/features/vehicle/server/queries";
 import { listPublishedBlogPosts } from "@/features/content/server/queries";
 import { FeaturedVehiclesCarousel } from "@/features/catalog/ui/FeaturedVehiclesCarousel";
 import { toPublicVehicleCard } from "@/features/catalog/lib/public-catalog";
-import { HomeHero } from "@/features/catalog/ui/HomeHero";
+import { HeroPrototype } from "@/features/catalog/ui/hero-prototype/HeroPrototype";
 import { HomePageSkeleton } from "@/features/catalog/ui/HomePageSkeleton";
 import { catalogFullBleedClass } from "@/features/catalog/lib/shell";
 import { BlogCard } from "@/features/content/ui/BlogCard";
@@ -15,15 +15,21 @@ import { STORE_MAPS_PLACE_URL, storeMapEmbedSrc } from "@/lib/store-maps";
 import { prisma } from "@/lib/db";
 
 
-export default function HomePage() {
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ variant?: string }>;
+}) {
+  const { variant } = await searchParams;
+
   return (
     <Suspense fallback={<HomePageSkeleton />}>
-      <HomePageContent />
+      <HomePageContent heroVariant={variant} />
     </Suspense>
   );
 }
 
-async function HomePageContent() {
+async function HomePageContent({ heroVariant }: { heroVariant?: string }) {
   const [settings, featured, posts, testimonials] = await Promise.all([
     getSiteSettings(),
     getFeaturedVehicles(9),
@@ -39,7 +45,7 @@ async function HomePageContent() {
     ? `https://wa.me/${wa}?text=${encodeURIComponent("Olá! Vim pelo site da Carros Cascavel.")}`
     : "#";
   const heroWhatsappHref = wa
-    ? `https://wa.me/${wa}?text=${encodeURIComponent("Olá! Quero começar minha história na Carros Cascavel.")}`
+    ? `https://wa.me/${wa}?text=${encodeURIComponent("Olá! Vim pelo site da Carros Cascavel.")}`
     : "#";
   const mapsHref = settings?.googleMapsUrl?.trim() || STORE_MAPS_PLACE_URL;
   const mapsEmbed = storeMapEmbedSrc(settings?.latitude, settings?.longitude);
@@ -54,7 +60,7 @@ async function HomePageContent() {
 
   return (
     <main>
-      <HomeHero whatsappHref={heroWhatsappHref} />
+      <HeroPrototype variant={heroVariant} whatsappHref={heroWhatsappHref} />
 
       {featured.length > 0 && (
         <section data-whatsapp-reveal className="py-16 sm:py-20">
