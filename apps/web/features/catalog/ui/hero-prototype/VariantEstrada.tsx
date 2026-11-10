@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type FocusEvent, type MouseEvent } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
@@ -18,7 +18,6 @@ const doors = [
     index: "01",
     title: "Comprar",
     line: "O estoque está aberto. Escolha o carro e a gente conduz o resto.",
-    scene: "/hero-cena-comprar.jpg",
   },
   {
     id: "vender",
@@ -26,7 +25,6 @@ const doors = [
     index: "02",
     title: "Vender",
     line: "Traga o seu. A avaliação vira proposta, sem formulário infinito.",
-    scene: "/hero-cena-vender.jpg",
   },
   {
     id: "financiar",
@@ -34,12 +32,8 @@ const doors = [
     index: "03",
     title: "Financiar",
     line: "Pré-ficha online. A parcela só existe depois da análise.",
-    scene: "/hero-cena-financiar.jpg",
   },
 ] as const;
-
-type DoorId = (typeof doors)[number]["id"];
-type Point = { x: number; y: number };
 
 function IntroChars({ text, className }: { text: string; className?: string }) {
   return (
@@ -68,21 +62,14 @@ type Props = {
 /**
  * Home hero — Estrada aberta.
  * Coded opening: the car runs to the horizon and the sun bursts into the hero.
- * On a fine pointer, each door floods the stage from the cursor. On a phone,
- * each door carries its own scene, because there is no hover.
+ * The stage keeps one family photo. Vender and financiar carry their own
+ * scene on those routes.
  */
 export function VariantEstrada({ reserveSwitcher = false }: Props) {
   const rootRef = useRef<HTMLElement>(null);
-  const stageRef = useRef<HTMLDivElement>(null);
   const introRef = useRef<gsap.core.Timeline | null>(null);
   const [mode, setMode] = useState<"intro" | "static">("intro");
   const [run, setRun] = useState(0);
-  const [active, setActive] = useState<DoorId | null>(null);
-  const [origins, setOrigins] = useState<Record<DoorId, Point>>({
-    comprar: { x: 0, y: 0 },
-    vender: { x: 0, y: 0 },
-    financiar: { x: 0, y: 0 },
-  });
   const loop = [...ticker, ...ticker];
 
   useGSAP(
@@ -152,36 +139,8 @@ export function VariantEstrada({ reserveSwitcher = false }: Props) {
     { scope: rootRef, dependencies: [mode, run], revertOnUpdate: true },
   );
 
-  function openFromPoint(id: DoorId, point: Point) {
-    setOrigins((current) => ({ ...current, [id]: point }));
-    setActive(id);
-  }
-
-  function canFlood() {
-    return window.matchMedia("(min-width: 768px)").matches;
-  }
-
-  function onDoorEnter(id: DoorId, event: MouseEvent<HTMLAnchorElement>) {
-    if (!canFlood()) return;
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    openFromPoint(id, { x: event.clientX - stage.left, y: event.clientY - stage.top });
-  }
-
-  function onDoorFocus(id: DoorId, event: FocusEvent<HTMLAnchorElement>) {
-    if (!canFlood()) return;
-    const stage = stageRef.current?.getBoundingClientRect();
-    const door = event.currentTarget.getBoundingClientRect();
-    if (!stage) return;
-    openFromPoint(id, {
-      x: door.left + door.width / 2 - stage.left,
-      y: door.top + door.height / 2 - stage.top,
-    });
-  }
-
   function replayIntro() {
     sessionStorage.removeItem(INTRO_SEEN_KEY);
-    setActive(null);
     setMode("intro");
     setRun((value) => value + 1);
   }
@@ -275,40 +234,14 @@ export function VariantEstrada({ reserveSwitcher = false }: Props) {
         ) : null}
       </div>
 
-      <div
-        ref={stageRef}
-        className="relative flex min-h-[calc(100svh-3.5rem-2.6rem)] flex-col overflow-hidden"
-      >
+      <div className="relative flex min-h-[calc(100svh-3.5rem-2.6rem)] flex-col overflow-hidden">
         <img
           src="/hero-familia-sonho.jpg"
           alt=""
-          className="absolute inset-0 h-full w-full object-cover transition duration-1000 ease-out"
-          style={{
-            transform: active ? "scale(1.08)" : "scale(1)",
-            filter: active ? "brightness(0.45) blur(2px)" : "brightness(0.8)",
-          }}
+          className="absolute inset-0 h-full w-full object-cover object-center"
         />
 
-        {doors.map((door) => {
-          const open = active === door.id;
-          const { x, y } = origins[door.id];
-          return (
-            <img
-              key={door.id}
-              src={door.scene}
-              alt=""
-              className="pointer-events-none absolute inset-0 hidden h-full w-full object-cover md:block"
-              style={{
-                clipPath: `circle(${open ? "150%" : "0%"} at ${x}px ${y}px)`,
-                transform: open ? "scale(1)" : "scale(1.12)",
-                transition:
-                  "clip-path 900ms cubic-bezier(.7,0,.2,1), transform 1400ms cubic-bezier(.2,.7,.2,1)",
-              }}
-            />
-          );
-        })}
-
-        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.75)_0%,rgba(0,0,0,0.15)_34%,rgba(0,0,0,0.1)_52%,rgba(0,0,0,0.85)_100%)]" />
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.28)_0%,rgba(0,0,0,0.05)_42%,rgba(0,0,0,0.08)_62%,rgba(0,0,0,0.55)_100%)]" />
 
         <div className="relative z-10 px-5 pt-5 sm:px-10 sm:pt-12 lg:px-14">
           <h1 className="max-w-5xl">
@@ -320,7 +253,7 @@ export function VariantEstrada({ reserveSwitcher = false }: Props) {
             </span>
             <span
               data-hero-line
-              className="mt-1 block font-display text-[clamp(1.85rem,8.6vw,6.5rem)] uppercase leading-[0.92] [text-shadow:0_6px_40px_rgba(0,0,0,0.5)] sm:mt-2"
+              className="mt-1 block font-display text-[clamp(1.3rem,6vw,4.55rem)] uppercase leading-[0.92] [text-shadow:0_6px_40px_rgba(0,0,0,0.5)] sm:mt-2"
             >
               Sua próxima{" "}
               <span className="relative inline-block text-[#E2232E]">
@@ -329,7 +262,7 @@ export function VariantEstrada({ reserveSwitcher = false }: Props) {
                   aria-hidden
                   viewBox="0 0 400 24"
                   preserveAspectRatio="none"
-                  className="absolute -bottom-1 left-0 h-3 w-full sm:-bottom-4 sm:h-5"
+                  className="absolute -bottom-1 left-0 h-2 w-full sm:-bottom-3 sm:h-3.5"
                 >
                   <path
                     data-hero-swoosh
@@ -350,64 +283,39 @@ export function VariantEstrada({ reserveSwitcher = false }: Props) {
         </div>
 
         <div
-          className={`relative z-10 mt-auto flex flex-col border-t border-white/15 md:h-[44%] md:min-h-[17rem] md:flex-row ${
-            reserveSwitcher ? "bg-[#1C2220] pb-28 md:bg-transparent md:pb-0" : ""
+          className={`relative z-10 mt-auto flex flex-col border-t border-white/20 bg-black/35 backdrop-blur-[2px] md:flex-row ${
+            reserveSwitcher ? "pb-28 md:pb-0" : ""
           }`}
         >
-          {doors.map((door) => {
-            const open = active === door.id;
-            const dimmed = active !== null && !open;
-            return (
-              <Link
-                key={door.id}
-                data-hero-door
-                href={door.href}
-                data-hero-cta={door.id === "comprar" ? "" : undefined}
-                onMouseEnter={(event) => onDoorEnter(door.id, event)}
-                onMouseLeave={() => setActive(null)}
-                onFocus={(event) => onDoorFocus(door.id, event)}
-                onBlur={() => setActive(null)}
-                className={`group relative flex flex-col justify-end overflow-hidden border-b border-white/15 px-5 py-3.5 transition-[flex-grow,opacity] duration-700 ease-[cubic-bezier(.7,0,.2,1)] sm:px-8 md:min-h-0 md:border-b-0 md:border-l md:px-8 md:pb-20 md:pt-8 md:first:border-l-0 ${
-                  open ? "md:grow-[1.7]" : "md:grow"
-                } ${dimmed ? "md:opacity-55" : "opacity-100"} md:basis-0`}
-              >
-                <img
-                  src={door.scene}
-                  alt=""
-                  className="pointer-events-none absolute inset-0 h-full w-full object-cover md:hidden"
-                />
-                <span className="pointer-events-none absolute inset-0 bg-gradient-to-r from-black/75 via-black/45 to-black/25 md:hidden" />
-                <span
-                  className={`absolute inset-x-0 top-0 h-1 origin-left bg-[#E2232E] transition-transform duration-700 ${
-                    open ? "scale-x-100" : "scale-x-0"
-                  }`}
-                />
-                <span className="relative font-hero text-[10px] font-bold uppercase tracking-[0.28em] text-white/70 sm:text-xs">
-                  {door.index} · Quero
+          {doors.map((door) => (
+            <Link
+              key={door.id}
+              data-hero-door
+              href={door.href}
+              data-hero-cta={door.id === "comprar" ? "" : undefined}
+              className="group relative flex flex-1 flex-col justify-end border-b border-white/15 px-5 py-4 sm:px-8 md:border-b-0 md:border-l md:px-8 md:pb-8 md:pt-7 md:first:border-l-0"
+            >
+              <span className="absolute inset-x-0 top-0 h-0.5 origin-left scale-x-0 bg-[#E2232E] transition-transform duration-500 group-hover:scale-x-100" />
+              <span className="relative font-hero text-[11px] font-bold uppercase tracking-[0.28em] text-white/55">
+                {door.index}
+              </span>
+              <span className="relative mt-1 font-hero text-sm font-extrabold uppercase tracking-[0.22em] text-[#E2232E] sm:text-base md:text-lg">
+                Quero
+              </span>
+              <h2 className="font-display relative mt-1 text-[2rem] uppercase leading-none sm:text-5xl md:text-6xl lg:text-7xl">
+                {door.title}
+              </h2>
+              <p className="relative mt-2 hidden max-w-sm text-sm leading-relaxed text-white/80 md:block">
+                {door.line}
+              </p>
+              <span className="relative mt-3 inline-flex items-center gap-3 text-xs font-bold uppercase tracking-widest text-white/90 sm:text-sm">
+                <span className="flex h-8 w-8 items-center justify-center rounded-full border border-white/40 transition duration-500 group-hover:border-[#E2232E] group-hover:bg-[#E2232E] md:h-10 md:w-10">
+                  →
                 </span>
-                <h2 className="font-display relative mt-1 text-[2rem] uppercase leading-none sm:text-5xl md:mt-2 md:text-6xl lg:text-7xl xl:text-8xl">
-                  {door.title}
-                </h2>
-                <p
-                  className={`hidden max-w-sm overflow-hidden text-sm leading-relaxed text-white/85 transition-all duration-500 md:block md:max-h-0 md:opacity-0 ${
-                    open ? "md:mt-3 md:max-h-24 md:opacity-100" : "md:mt-0"
-                  }`}
-                >
-                  {door.line}
-                </p>
-                <span className="relative mt-2 inline-flex items-center gap-3 text-xs font-bold uppercase tracking-widest sm:text-sm md:mt-5">
-                  <span
-                    className={`flex h-8 w-8 items-center justify-center rounded-full border transition duration-500 md:h-10 md:w-10 ${
-                      open ? "border-[#E2232E] bg-[#E2232E]" : "border-white/40"
-                    }`}
-                  >
-                    →
-                  </span>
-                  Entrar
-                </span>
-              </Link>
-            );
-          })}
+                Entrar
+              </span>
+            </Link>
+          ))}
         </div>
       </div>
     </section>

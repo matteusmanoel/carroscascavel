@@ -13,8 +13,14 @@ export default async function VenderVeiculoPage() {
 
   return (
     <main className="min-h-screen">
-      <section className="bg-gradient-to-br from-facil-black to-zinc-900 px-4 py-16 text-white">
-        <div className="mx-auto max-w-6xl">
+      <section className="relative flex min-h-[70vh] items-end overflow-hidden px-4 py-16 text-white md:py-20">
+        <img
+          src="/hero-cena-vender.jpg"
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover"
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/45 to-black/20" />
+        <div className="relative mx-auto max-w-6xl">
           <h1 className="text-4xl font-extrabold md:text-5xl">
             Venda ou consigne seu carro
           </h1>
