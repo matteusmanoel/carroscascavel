@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { ChevronLeft, ChevronRight, Save } from "lucide-react";
 import { createVehicle, updateVehicle } from "@/features/vehicle/server/mutations";
 import { vehicleFormFooterAction } from "@/features/vehicle/lib/form-navigation";
+import { stockTypeLabels } from "@/features/vehicle/lib/labels";
 import { createVehicleSchema, type CreateVehicleInput } from "@/schemas/vehicle";
 import { Stepper } from "@/components/ui/stepper";
 import { Button } from "@/components/ui/button";
@@ -70,14 +71,10 @@ type VehicleForForm = {
   featured: boolean;
   images: { url: string }[];
   features: { label: string }[];
-  owners?: { partnerId: string }[];
 };
-
-type PartnerOption = { id: string; name: string };
 
 interface VehicleFormProps {
   brands: BrandOption[];
-  partners?: PartnerOption[];
   vehicle?: VehicleForForm | null;
   readOnly?: boolean;
   canManageBrands?: boolean;
@@ -130,10 +127,6 @@ const STEP_FIELDS: Record<number, (keyof CreateVehicleInput)[]> = {
 };
 
 const STOCK_TYPES = ["OWNED", "CONSIGNED"] as const;
-const STOCK_LABELS: Record<string, string> = {
-  OWNED: "Próprio",
-  CONSIGNED: "Consignado",
-};
 const HISTORY_TYPES = ["CLEAN", "AUCTION", "RECOVERED_CLAIM", "AUCTION_AND_RECOVERED_CLAIM"] as const;
 const HISTORY_LABELS: Record<string, string> = {
   CLEAN: "Histórico limpo",
@@ -193,7 +186,7 @@ function FormSelect({
   label: string;
   required?: boolean;
   error?: string;
-  value: string;
+  value?: string;
   onValueChange: (v: string) => void;
   placeholder?: string;
   items: { value: string; label: string }[];
@@ -296,7 +289,7 @@ function FormTextarea({
   );
 }
 
-export function VehicleForm({ brands, partners = [], vehicle, readOnly = false, canManageBrands = false }: VehicleFormProps) {
+export function VehicleForm({ brands, vehicle, readOnly = false, canManageBrands = false }: VehicleFormProps) {
   const router = useRouter();
   const isEdit = !!vehicle;
   const [step, setStep] = useState(0);
@@ -339,7 +332,6 @@ export function VehicleForm({ brands, partners = [], vehicle, readOnly = false, 
       plateFinal: vehicle?.plateFinal ?? "",
       stockType: (vehicle?.stockType as CreateVehicleInput["stockType"]) ?? undefined,
       commercialHistory: (vehicle?.commercialHistory as CreateVehicleInput["commercialHistory"]) ?? undefined,
-      partnerIds: vehicle?.owners?.map((o) => o.partnerId) ?? [],
       priceCash: vehicle?.priceCash != null ? Number(vehicle.priceCash) : undefined,
       priceTradeIn: vehicle?.priceTradeIn != null ? Number(vehicle.priceTradeIn) : undefined,
       priceFipe: vehicle?.priceFipe != null ? Number(vehicle.priceFipe) : undefined,
@@ -375,7 +367,6 @@ export function VehicleForm({ brands, partners = [], vehicle, readOnly = false, 
   const transmission = watch("transmission");
   const stockType = watch("stockType");
   const commercialHistory = watch("commercialHistory");
-  const partnerIds = watch("partnerIds") ?? [];
   const priceCash = watch("priceCash");
   const priceTradeIn = watch("priceTradeIn");
   const priceFipe = watch("priceFipe");
@@ -548,6 +539,7 @@ export function VehicleForm({ brands, partners = [], vehicle, readOnly = false, 
       const typed = data as CreateVehicleInput;
       const formData = new FormData();
       Object.entries(typed).forEach(([k, v]) => {
+        if (k === "partnerIds") return;
         if (typeof v === "boolean") {
           formData.set(k, v ? "true" : "false");
         } else if (typeof v === "number" && Number.isNaN(v)) {
@@ -560,7 +552,6 @@ export function VehicleForm({ brands, partners = [], vehicle, readOnly = false, 
       formData.set("featured", typed.featured ? "true" : "false");
       formData.set("aceitaTroca", typed.aceitaTroca ? "true" : "false");
       formData.set("aceitaSemEntrada", typed.aceitaSemEntrada ? "true" : "false");
-      formData.set("partnerIds", (typed.partnerIds ?? []).join(","));
       if (typed.fuelType === undefined) formData.set("fuelType", "");
       if (typed.bodyStyle === undefined) formData.set("bodyStyle", "");
       if (typed.inspectionResult === undefined) formData.set("inspectionResult", "");
@@ -700,18 +691,16 @@ export function VehicleForm({ brands, partners = [], vehicle, readOnly = false, 
                     items={STATUSES.map((s) => ({ value: s, label: STATUS_LABELS[s] }))}
                   />
                   <FormSelect
-                    label="Tipo de estoque"
+                    label="Origem"
                     error={errors.stockType?.message}
-                    value={stockType ? String(stockType) : SELECT_NONE}
+                    value={stockType ? String(stockType) : undefined}
                     onValueChange={(v) =>
-                      setValue("stockType", (v === SELECT_NONE ? undefined : v) as CreateVehicleInput["stockType"], {
+                      setValue("stockType", v as CreateVehicleInput["stockType"], {
                         shouldValidate: true,
                       })
                     }
-                    items={[
-                      { value: SELECT_NONE, label: "Não informado" },
-                      ...STOCK_TYPES.map((s) => ({ value: s, label: STOCK_LABELS[s] })),
-                    ]}
+                    placeholder="Selecione"
+                    items={STOCK_TYPES.map((s) => ({ value: s, label: stockTypeLabels[s] ?? s }))}
                   />
                   <FormSelect
                     label="Histórico comercial"
@@ -730,35 +719,6 @@ export function VehicleForm({ brands, partners = [], vehicle, readOnly = false, 
                     ]}
                   />
                 </div>
-                {partners.length > 0 ? (
-                  <div className="space-y-2">
-                    <FieldLabel>Sócios proprietários</FieldLabel>
-                    <p className="text-xs text-facil-muted">
-                      Participação societária fica em branco até ser informada. Não assume divisão igual.
-                    </p>
-                    <div className="flex flex-wrap gap-3">
-                      {partners.map((partner) => {
-                        const checked = partnerIds.includes(partner.id);
-                        return (
-                          <label key={partner.id} className="flex cursor-pointer items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => {
-                                const next = checked
-                                  ? partnerIds.filter((id) => id !== partner.id)
-                                  : [...partnerIds, partner.id];
-                                setValue("partnerIds", next, { shouldDirty: true });
-                              }}
-                              className="h-4 w-4 rounded border-zinc-300 accent-facil-orange"
-                            />
-                            {partner.name}
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
                 <FormInput
                   label="Descrição curta"
                   placeholder="Resumo em uma linha"

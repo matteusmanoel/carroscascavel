@@ -105,10 +105,3 @@ export async function getBrandsForVehicleForm() {
   }));
 }
 
-export async function getPartnersForVehicleForm() {
-  return prisma.partner.findMany({
-    where: { isActive: true },
-    orderBy: { name: "asc" },
-    select: { id: true, name: true, slug: true },
-  });
-}

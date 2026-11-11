@@ -25,7 +25,7 @@ export const statusLabels: Record<string, string> = {
 };
 
 export const stockTypeLabels: Record<string, string> = {
-  OWNED: "Próprio",
+  OWNED: "Loja",
   CONSIGNED: "Consignado",
 };
 

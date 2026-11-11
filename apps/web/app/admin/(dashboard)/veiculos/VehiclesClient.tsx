@@ -526,7 +526,7 @@ export function VehiclesClient({
                 />
               </div>
               <div className="space-y-2">
-                <FilterFieldLabel>Estoque</FilterFieldLabel>
+                <FilterFieldLabel>Origem</FilterFieldLabel>
                 {STOCK_OPTIONS.map((option) => (
                   <FilterSwitchRow
                     key={option.value}
@@ -686,7 +686,7 @@ export function VehiclesClient({
                 <th className="admin-table-header">Título</th>
                 <th className="admin-table-header">Marca</th>
                 <th className="admin-table-header">Status</th>
-                <th className="admin-table-header">Estoque</th>
+                <th className="admin-table-header">Origem</th>
                 {canWrite ? <th className="admin-table-header">Alterar status</th> : null}
                 <th className="admin-table-header">Preço</th>
                 <th className="admin-table-header w-12">Ações</th>

@@ -4,7 +4,7 @@ import { ChevronLeft, ExternalLink, Printer } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { guardAdminSection } from "@/features/auth/server/rbac";
 import { canWriteVehicles } from "@/features/auth/rbac-config";
-import { getBrandsForVehicleForm, getPartnersForVehicleForm } from "@/features/catalog/server/queries";
+import { getBrandsForVehicleForm } from "@/features/catalog/server/queries";
 import { VehicleForm } from "../VehicleForm";
 import { ArchiveVehicleButton } from "../ArchiveVehicleButton";
 import { DeleteVehicleButton } from "../DeleteVehicleButton";
@@ -17,17 +17,15 @@ export default async function AdminVeiculoEditPage({
   const user = await guardAdminSection("veiculos");
   const readOnly = !canWriteVehicles(user.role);
   const { id } = await params;
-  const [vehicle, brands, partners] = await Promise.all([
+  const [vehicle, brands] = await Promise.all([
     prisma.vehicle.findUnique({
       where: { id },
       include: {
         images: { orderBy: { sortOrder: "asc" } },
         features: { orderBy: { sortOrder: "asc" } },
-        owners: { select: { partnerId: true } },
       },
     }),
     getBrandsForVehicleForm(),
-    getPartnersForVehicleForm(),
   ]);
 
   if (!vehicle) notFound();
@@ -112,7 +110,6 @@ export default async function AdminVeiculoEditPage({
 
       <VehicleForm
         brands={brands}
-        partners={partners}
         vehicle={serializedVehicle}
         readOnly={readOnly}
         canManageBrands={!readOnly}

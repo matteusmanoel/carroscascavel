@@ -227,9 +227,9 @@ export async function updateVehicle(formData: FormData) {
         data: features.map((f) => ({ ...f, vehicleId: id })),
       });
   }
-  if (partnerIds) {
+  if (formData.has("partnerIds")) {
     await prisma.vehicleOwner.deleteMany({ where: { vehicleId: id } });
-    if (partnerIds.length) {
+    if (partnerIds?.length) {
       await prisma.vehicleOwner.createMany({
         data: partnerIds.map((partnerId) => ({ vehicleId: id, partnerId })),
       });
